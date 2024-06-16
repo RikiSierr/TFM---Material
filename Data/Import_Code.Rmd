@@ -1,0 +1,82 @@
+---
+title: "FBREF"
+author: "Ricard Sierra"
+date: '2023-12-28'
+output: html_document
+---
+
+```{r}
+library(devtools)
+# devtools::install_github("JaseZiv/worldfootballR")
+library(worldfootballR)
+```
+
+#Extraccion de datos
+```{r}
+mapped_players <- player_dictionary_mapping()
+unique(dplyr::glimpse(mapped_players)$ TmPos)
+```
+
+**big5 - Teams**
+```{r}
+variables <- c("standard",
+              "shooting",
+              "passing",
+              "passing_types",
+              "gca",
+              "defense",
+              "possession",
+              "playing_time",
+              "misc",
+              "keepers",
+              "keepers_adv")
+
+# Define el directorio donde quieres guardar los archivos CSV
+teams_directory <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams"
+
+for(variable in variables){
+  # Crear el nombre de la variable dinámicamente
+  variable_name <- paste0("big5_team_", variable)
+
+  # Guardar los datos en la variable con el nombre dinámico
+  data <- fb_big5_advanced_season_stats(season_end_year = c(2018:2023), stat_type=variable, team_or_player = "team")
+  assign(variable_name, data)
+
+  # Crear la ruta del archivo CSV
+  csv_file_path <- file.path(teams_directory, paste0(variable_name, ".csv"))
+
+  # Exportar a CSV
+  write.csv(data, csv_file_path, row.names = FALSE, fileEncoding = "UTF-8")
+}
+
+big5_team_standard
+```
+
+**big5 - Players**
+```{r}
+players_directory <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players"
+
+for(variable in variables){
+  # Crear el nombre de la variable dinámicamente
+  variable_name <- paste0("big5_players_", variable)
+
+  # Guardar los datos en la variable con el nombre dinámico
+  data <- fb_big5_advanced_season_stats(season_end_year = c(2018:2023), stat_type=variable, team_or_player = "player")
+  assign(variable_name, data)
+
+  # Crear la ruta del archivo CSV
+  csv_file_path <- file.path(players_directory, paste0(variable_name, ".csv"))
+
+  # Exportar a CSV
+  write.csv(data, csv_file_path, row.names = FALSE, fileEncoding = "UTF-8")
+}
+
+library(readr)
+big5_players_shooting <- read_csv("Players/big5_players_shooting.csv")
+head(big5_players_shooting)
+```
+
+
+
+
+
