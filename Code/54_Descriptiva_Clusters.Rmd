@@ -1,0 +1,810 @@
+---
+title: "Descriptiva de Clusters"
+author: "Ricard Sierra"
+date: '2024-05-17'
+output: html_document
+---
+
+```{r}
+library(readr)
+library(fmsb)
+library(ggplot2)
+library(ggiraphExtra)
+library(ggrepel)
+library(ggstatsplot)
+library(dplyr)
+library(RColorBrewer)
+library(tidyr)
+library(ggExtra)
+library(cowplot)
+library(ggsci)
+```
+
+
+```{r}
+library(fmsb)
+
+transformar_a_percentil <- function(df) {
+  df_percentil <- df
+  
+  # Aplicar la transformación a cada columna numérica
+  num_cols <- sapply(df, is.numeric)
+  
+  for (col in names(df)[num_cols]) {
+    # Calcular la función de distribución acumulativa empírica (ECDF)
+    ecdf_col <- ecdf(df[[col]])
+    # Transformar los valores de la columna a percentiles
+    df_percentil[[col]] <- sapply(df[[col]], ecdf_col)
+  }
+  
+  return(df_percentil)
+}
+
+# Función para calcular el área de un polígono a partir de sus vértices
+calcular_area_poligono <- function(x, y) {
+  n <- length(x)
+  area <- 0
+  j <- n # Inicializando j al último vértice del polígono
+  for (i in 1:n) {
+    area <- area + (x[j] + x[i]) * (y[j] - y[i])
+    j <- i  # j es previo a i
+  }
+  return(abs(area / 2))
+}
+
+# dataset = Player_data
+# cluster_col = "Cluster"
+# typedata = 1
+# output_dir = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Players_noGK/Pruevas/"
+
+crear_graficos_radar <- function(dataset, cluster_col = "Cluster", typedata = 1, output_dir = ".") {
+  
+  # Identificar los sufijos y los grupos de variables
+  if (typedata == 1) {
+    sufijos <- c("_Generales", "_Ataque", "_Defensa", "_Transiciones")
+    title_grapf <- "_Players"
+  } else if (typedata == 2) {
+    sufijos <- c("_Generales", "_Porteria")
+    title_grapf <- "_GK"
+  } else if (typedata == 3) {
+    sufijos <- c("_Generales", "_Ataque", "_Defensa", "_Transiciones", "_Porteria")
+    title_grapf <- "_Team"
+  } else {
+    stop("typedata debe ser 1, 2 o 3")
+  }
+  
+  # Colores asociados a cada sufijo
+  color_map <- c(
+    "_Generales" = "blue",
+    "_Ataque" = "purple4",
+    "_Defensa" = "wheat2",
+    "_Transiciones" = "green4",
+    "_Porteria" = "deeppink2"
+  )
+  
+  # Calcular los percentiles para cada variable del grupo
+  dataset <- transformar_a_percentil(dataset)
+  
+  # Verificar que la columna de cluster existe en el dataset
+  if (!cluster_col %in% colnames(dataset)) {
+    stop(paste("La columna de cluster", cluster_col, "no existe en el dataset."))
+  }
+  
+  # Obtener los valores únicos del cluster
+  clusters <- unique(dataset[[cluster_col]])
+  
+  # DataFrame para almacenar las áreas
+  areas_df <- data.frame(Cluster = character(), Sufijo = character(), Area = numeric(), stringsAsFactors = FALSE)
+  
+  for (sufijo in sufijos) {
+    # sufijo = sufijos[1]
+    # Filtrar las columnas que terminan con el sufijo actual
+    cols_grupo <- grep(paste0(sufijo, "$"), colnames(dataset), value = TRUE)
+    
+    # Si no hay columnas con el sufijo actual, continuar con el siguiente sufijo
+    if (length(cols_grupo) == 0) {
+      next
+    }
+    
+    for (cluster in clusters) {
+      
+      # cluster = clusters[1]
+      # Filtrar los datos del cluster actual
+      datos_cluster <- subset(dataset[, cols_grupo], dataset[[cluster_col]] == cluster)
+      
+      # Si no hay datos para el cluster actual, continuar con el siguiente cluster
+      if (nrow(datos_cluster) == 0) {
+        next
+      }
+      
+      # Calcular la media de los percentiles
+      medias_percentiles <- colMeans(datos_cluster, na.rm = TRUE)
+      
+      # Preparar los datos para el gráfico de radar
+      datos_radar <- as.data.frame(rbind(rep(1, length(medias_percentiles)),
+                                         rep(0, length(medias_percentiles)), 
+                                         medias_percentiles))
+      rownames(datos_radar) <- NULL
+      
+      # Nombre del archivo PNG
+      nombre_archivo <- paste0("Radar", cluster, sufijo, title_grapf, ".png")
+      ruta_archivo <- file.path(output_dir, nombre_archivo)
+      
+      # Guardar el gráfico como PNG con tamaño específico
+      png(ruta_archivo, width = 3000, height = 3000, res = 300)
+      
+      # Configurar los parámetros gráficos
+      op <- par(mar = c(2, 2, 2, 2))  # Ajustar los márgenes
+      
+      # Obtener el color correspondiente al sufijo
+      color <- color_map[[sufijo]]
+      
+      vlabels_modificados <- sub(sufijo, "", names(medias_percentiles))
+      
+      # Dibujar el gráfico de radar
+      radarchart(datos_radar, 
+                 axistype = 1,
+                 pcol = color,
+                 pfcol = adjustcolor(color, alpha.f = 0.5),
+                 plwd = 2, 
+                 plty = 1,  # Configuraciones de líneas
+                 cglcol = "grey", cglty = 1, cglwd = 0.8,  # Configuraciones de la cuadrícula
+                 axislabcol = "grey",  # Ocultar etiquetas del eje
+                 caxislabels = seq(0, 1, 0.25), # Ocultar etiquetas del eje internas
+                 vlabels = vlabels_modificados,  # Etiquetas de las variables
+                 vlcex = 0.8,  # Tamaño de la fuente de las etiquetas
+                 title = paste("Radar Chart -", cluster, sufijo, title_grapf))  # Título del gráfico
+      
+      # Restaurar los parámetros gráficos originales
+      par(op)
+      
+      # Cerrar el dispositivo gráfico
+      dev.off()
+      
+      # Calcular el área del gráfico de radar
+      n <- length(medias_percentiles)
+      angulos <- seq(0, 2 * pi, length.out = n + 1)[1:n]
+      x <- cos(angulos) * medias_percentiles
+      y <- sin(angulos) * medias_percentiles
+      area <- calcular_area_poligono(x, y)
+      
+      # Agregar el área al dataframe
+      areas_df <- rbind(areas_df, data.frame(Cluster = cluster, Sufijo = sufijo, Area = area, stringsAsFactors = FALSE))
+      rownames(areas_df) <- NULL
+    }
+  }
+  
+  return(areas_df)
+}
+
+# Ejemplo de uso
+# dataset <- read.csv("ruta/al/dataset.csv")
+# areas <- crear_graficos_radar(dataset, cluster_col = "Cluster", typedata = 1, output_dir = "ruta/al/directorio")
+# print(areas)
+
+```
+
+# Jugadores
+
+```{r}
+Player_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_noGK_data_clustered.csv", 
+    col_types = cols(Season_End_Year = col_character()))
+
+# Convertir la variable numérica en un factor con etiquetas "Cluster - 0" a "Cluster - n"
+variable_cluster <- factor(Player_data$Cluster,
+                           levels = unique(Player_data$Cluster), 
+                           labels = paste("Cluster -", unique(Player_data$Cluster)))
+
+# Ver el resultado
+Player_data$Cluster <- variable_cluster
+
+areas_players <- crear_graficos_radar(dataset = Player_data, cluster_col = "Cluster", typedata = 1, output_dir = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Players_noGK/")
+```
+
+```{r}
+# set.seed(410)  # Configurar una semilla para reproducibilidad
+data_subset <- subset(Player_data, Player_data$Cluster == "Cluster - 13")
+sampled_df <- sample_n(data_subset, 5); sampled_df[,c(1, 4, 67)]
+```
+
+
+```{r}
+# Preparar los datos para la matriz de recuento
+player_season_clusters <- Player_data %>%
+  group_by(Player) %>%
+  summarise(
+    n_clusters = n_distinct(Cluster),
+    n_seasons = n_distinct(Season_End_Year)
+  )
+
+# Crear la matriz de recuento
+count_matrix <- player_season_clusters %>%
+  count(n_clusters, n_seasons)
+
+# Calcular el percentil de corte
+percentile_corte <- quantile(count_matrix$n, 0.99)
+
+# Crear el gráfico de la matriz de recuento como objeto
+matrix_plot <- ggplot(count_matrix, aes(x = n_clusters, y = n_seasons, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n, color = ifelse(n > percentile_corte, "white", "black"))) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  scale_color_identity() +
+  labs(
+    title = "Matriz Recuento Clusters-Temporadas",
+    x = "Nº de Clusters",
+    y = "Nº de Temporadas",
+    fill = "Nº de Jugadores"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.text = element_text(color = "grey20"),
+    axis.title = element_text(color = "grey20", size = 12)
+  )
+
+# Crear histogramas marginales con etiquetas
+x_marginal <- ggplot(player_season_clusters, aes(x = n_clusters)) +
+  geom_bar(fill = "steelblue", color = "white") +
+  geom_text(stat = 'count', aes(label = ..count..), vjust = -0.5, color = "black") +
+  labs(x = "NºClústers") +
+  labs(y = "") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title.x = element_text(color = "grey20", size = 12),
+    axis.text.x = element_text(color = "grey20"),
+    plot.margin = unit(c(0, 0, 0, 0), "cm")
+  )
+
+y_marginal <- ggplot(player_season_clusters, aes(x = n_seasons)) +
+  geom_bar(fill = "steelblue", color = "white") +
+  geom_text(stat = 'count', aes(label = ..count..), hjust = -0.1, color = "black") +
+  coord_flip() +
+  labs(y = "") +
+  labs(x = "NºTemp.") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title.y = element_text(color = "grey20", size = 12),
+    axis.text.y = element_text(color = "grey20"),
+    plot.margin = unit(c(0, 0, 0, 0), "cm")
+  )
+
+# Ajustar los tamaños relativos y combinar el gráfico principal con los gráficos marginales
+combined_plot <- plot_grid(
+  plot_grid(NULL, y_marginal, nrow = 2, rel_heights = c(0.2, 1)),
+  plot_grid(matrix_plot, x_marginal, ncol = 2, rel_widths = c(1, 0.2)),
+  ncol = 1,
+  rel_heights = c(0.2, 1)
+)
+
+# Guardar los gráficos como archivos PNG
+ggsave("hist_clusters_players.png", 
+       plot = combined_plot, 
+       path = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Players_noGK/Transiciones/", 
+       width = 8, 
+       height = 6)
+
+############################################################################################################
+############################################################################################################
+
+# Preparar datos para contar cambios de cluster
+data_4_count_players <- Player_data %>%
+  arrange(Player, Season_End_Year) %>%
+  group_by(Player) %>%
+  mutate(Cluster_change = lag(Cluster))
+
+# Contar los cambios únicos entre Cluster_change y Cluster sin importar el jugador
+cluster_changes_players <- data_4_count_players %>%
+  filter(!is.na(Cluster_change) & Cluster != Cluster_change) %>%
+  count(Cluster_change, Cluster, name = "n") %>%
+  group_by(Cluster_change, Cluster) %>%
+  summarise(n = sum(n), .groups = 'drop')
+
+# Especificar el orden deseado de los clusters
+desired_order <- c("Cluster - 0", "Cluster - 1", "Cluster - 2", "Cluster - 3", "Cluster - 4",
+                   "Cluster - 5", "Cluster - 6", "Cluster - 7", "Cluster - 8", "Cluster - 9",
+                   "Cluster - 10", "Cluster - 11", "Cluster - 12", "Cluster - 13")
+
+# Crear la visualización de cambios de cluster como objeto con degradado de color
+cluster_changes_plot <- ggplot(cluster_changes_players, 
+                               aes(x = factor(Cluster_change, levels = desired_order), 
+                                   y = factor(Cluster, levels = desired_order), 
+                                   size = n, 
+                                   fill = n)) +
+  geom_point(shape = 21, alpha = 0.7, color = "darkblue") +
+  scale_size_continuous(range = c(2, 10), breaks = pretty(cluster_changes_players$n)) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "Cambios de Cluster",
+    x = "Cluster Anterior",
+    y = "Cluster Nuevo",
+    size = "Frecuencia de Cambios",
+    fill = "Frecuencia de Cambios"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.text = element_text(color = "grey20"),
+    axis.title = element_text(color = "grey20", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotar etiquetas del eje x
+    panel.grid.major = element_line(color = "grey80"),
+    panel.grid.minor = element_line(color = "grey90")
+  ) +
+  guides(size = guide_legend(order = 1), fill = guide_legend(order = 1))
+
+ggsave("cluster_changes_plot_players.png", 
+       plot = cluster_changes_plot, 
+       path = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Players_noGK/Transiciones/", 
+       width = 8, 
+       height = 6)
+```
+
+```{r}
+# Definir el directorio de salida
+Carpeta_comp <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Players_noGK/Identificadoras/"
+
+# Filtrar las columnas de interés
+Player_data_identify <- Player_data[, c(1, 3, 6, 7, 66)]
+colnames_players_id <- colnames(Player_data_identify)
+
+# Crear una paleta de 14 colores usando colorRampPalette
+# Primero, instala y carga la librería "ggsci" si no la tienes ya instalada
+if (!requireNamespace("ggsci", quietly = TRUE)) {
+  install.packages("ggsci")
+}
+
+library(ggsci)
+
+# Define una paleta de 14 colores
+my_palette <- c(
+  "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00",
+  "#FFFF33", "#A65628", "#F781BF", "#999999", "#66C2A5",
+  "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854"
+)
+
+# Definir el orden personalizado de los niveles del Cluster
+custom_order <- c("Cluster - 0",
+                  "Cluster - 1",
+                  "Cluster - 2",
+                  "Cluster - 3",
+                  "Cluster - 4",
+                  "Cluster - 5",
+                  "Cluster - 6",
+                  "Cluster - 7",
+                  "Cluster - 8",
+                  "Cluster - 9",
+                  "Cluster - 10",
+                  "Cluster - 11",
+                  "Cluster - 12",
+                  "Cluster - 13")
+
+# Convertir Cluster en un factor con el orden personalizado
+Player_data$Cluster <- factor(Player_data$Cluster, levels = custom_order)
+
+for(i in colnames_players_id) {
+  if(is.numeric(Player_data[[i]])) {
+    # Generar el gráfico sin especificar la paleta inicialmente
+    plot_comp <- ggbetweenstats(
+      data = Player_data,
+      x = Cluster,
+      y ={{ i }},
+      title = paste("Comparativa de", i, "entre Clusters")
+      )
+    
+    # Aplicar la paleta personalizada después de generar el gráfico
+    plot_comp <- plot_comp +
+      scale_color_manual(values = my_palette) +  # Colores para los puntos y líneas
+      scale_fill_manual(values = my_palette)    # Colores para las áreas y barras
+    
+    } else {
+    plot_comp <- ggbarstats(
+      data = Player_data,
+      y = Cluster,
+      x ={{ i }},
+      # palette = "Set3",
+      # package = "RColorBrewer",
+      title = paste("Comparativa de", i, "entre clusters")
+    )
+  }
+  
+  file_path <- paste0(Carpeta_comp, "Comparativa_", i, "_clusters_Players.png")
+  ggsave(file_path, plot = plot_comp, width = 14, height = 7)
+}
+```
+
+# Porteros
+
+```{r}
+GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_GK_data_clustered.csv", 
+    col_types = cols(Season_End_Year = col_character()))
+
+# Convertir la variable numérica en un factor con etiquetas "Cluster - 0" a "Cluster - n"
+variable_cluster <- factor(GK_data$Cluster,
+                           levels = unique(GK_data$Cluster), 
+                           labels = paste("Cluster -", unique(GK_data$Cluster)))
+
+# Ver el resultado
+GK_data$Cluster <- variable_cluster
+
+areas_GK <- crear_graficos_radar(dataset = GK_data, cluster_col = "Cluster", typedata = 2, output_dir = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Players_GK/")
+```
+
+
+```{r}
+# set.seed(410)  # Configurar una semilla para reproducibilidad
+data_subset <- subset(GK_data, GK_data$Squad == "Barcelona")
+sampled_df <- sample_n(data_subset, 7); sampled_df[,c(1, 4, 23)]
+```
+
+```{r}
+# Preparar los datos para la matriz de recuento
+GK_season_clusters <- GK_data %>%
+  group_by(Player) %>%
+  summarise(
+    n_clusters = n_distinct(Cluster),
+    n_seasons = n_distinct(Season_End_Year)
+  )
+
+# Crear la matriz de recuento
+count_matrix <- GK_season_clusters %>%
+  count(n_clusters, n_seasons)
+
+# Calcular el percentil de corte
+percentile_corte <- quantile(count_matrix$n, 0.99)
+
+# Crear el gráfico de la matriz de recuento como objeto
+matrix_plot <- ggplot(count_matrix, aes(x = n_clusters, y = n_seasons, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n, color = ifelse(n > percentile_corte, "white", "black"))) +
+  scale_fill_gradient(low = "indianred1", high = "red4") +
+  scale_color_identity() +
+  labs(
+    title = "Matriz Recuento Clusters-Temporadas",
+    x = "Nº de Clusters",
+    y = "Nº de Temporadas",
+    fill = "Nº de Jugadores"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.text = element_text(color = "grey20"),
+    axis.title = element_text(color = "grey20", size = 12)
+  )
+
+# Crear histogramas marginales con etiquetas
+x_marginal <- ggplot(GK_season_clusters, aes(x = n_clusters)) +
+  geom_bar(fill = "firebrick1", color = "white") +
+  geom_text(stat = 'count', aes(label = ..count..), vjust = -0.5, color = "black") +
+  labs(x = "NºClústers") +
+  labs(y = "") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title.x = element_text(color = "grey20", size = 12),
+    axis.text.x = element_text(color = "grey20"),
+    plot.margin = unit(c(0, 0, 0, 0), "cm")
+  )
+
+y_marginal <- ggplot(GK_season_clusters, aes(x = n_seasons)) +
+  geom_bar(fill = "firebrick1", color = "white") +
+  geom_text(stat = 'count', aes(label = ..count..), hjust = -0.1, color = "black") +
+  coord_flip() +
+  labs(y = "") +
+  labs(x = "NºTemp.") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title.y = element_text(color = "grey20", size = 12),
+    axis.text.y = element_text(color = "grey20"),
+    plot.margin = unit(c(0, 0, 0, 0), "cm")
+  )
+
+# Ajustar los tamaños relativos y combinar el gráfico principal con los gráficos marginales
+combined_plot <- plot_grid(
+  plot_grid(NULL, y_marginal, nrow = 2, rel_heights = c(0.2, 1)),
+  plot_grid(matrix_plot, x_marginal, ncol = 2, rel_widths = c(1, 0.2)),
+  ncol = 1,
+  rel_heights = c(0.2, 1)
+)
+
+# Guardar los gráficos como archivos PNG
+ggsave("hist_clusters_GK.png", 
+       plot = combined_plot, 
+       path = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Players_GK/Transiciones/", 
+       width = 8, 
+       height = 6)
+
+############################################################################################################
+############################################################################################################
+
+
+# Preparar datos para contar cambios de cluster
+data_4_count_GKs <- GK_data %>%
+  arrange(Player, Season_End_Year) %>%
+  group_by(Player) %>%
+  mutate(Cluster_change = lag(Cluster))
+
+# Contar los cambios únicos entre Cluster_change y Cluster sin importar el jugador
+cluster_changes_GKs <- data_4_count_GKs %>%
+  filter(!is.na(Cluster_change) & Cluster != Cluster_change) %>%
+  count(Cluster_change, Cluster, name = "n") %>%
+  group_by(Cluster_change, Cluster) %>%
+  summarise(n = sum(n), .groups = 'drop')
+
+# Especificar el orden deseado de los clusters
+desired_order <- c("Cluster - 0", "Cluster - 1", "Cluster - 2")
+
+# Crear la visualización de cambios de cluster como objeto con degradado de color
+cluster_changes_plot <- ggplot(cluster_changes_GKs, 
+                               aes(x = factor(Cluster_change, levels = desired_order), 
+                                   y = factor(Cluster, levels = desired_order), 
+                                   size = n, 
+                                   fill = n)) +
+  geom_point(shape = 21, alpha = 0.7, color = "red4") +
+  scale_size_continuous(range = c(2, 10), breaks = pretty(cluster_changes_GKs$n)) +
+  scale_fill_gradient(low = "indianred1", high = "red4") +
+  labs(
+    title = "Cambios de Cluster",
+    x = "Cluster Anterior",
+    y = "Cluster Nuevo",
+    size = "Frecuencia de Cambios",
+    fill = "Frecuencia de Cambios"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.text = element_text(color = "grey20"),
+    axis.title = element_text(color = "grey20", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotar etiquetas del eje x
+    panel.grid.major = element_line(color = "grey80"),
+    panel.grid.minor = element_line(color = "grey90")
+  ) +
+  guides(size = guide_legend(order = 1), fill = guide_legend(order = 1))
+
+ggsave("cluster_changes_plot_GK.png", 
+       plot = cluster_changes_plot, 
+       path = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Players_GK/Transiciones/", 
+       width = 8, 
+       height = 6)
+```
+
+
+
+
+```{r}
+Carpeta_comp <- c("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Players_GK/Identificadoras/")
+
+GK_data_identify <- GK_data[,c(1, 3, 7)]
+
+colnames_GK_id <- colnames(GK_data_identify)
+
+# Definir el orden personalizado de los niveles del Cluster
+custom_order <- c("Cluster - 0",
+                  "Cluster - 1",
+                  "Cluster - 2")
+
+# Convertir Cluster en un factor con el orden personalizado
+GK_data$Cluster <- factor(GK_data$Cluster, levels = custom_order)
+
+for(i in colnames_GK_id){
+  if(is.numeric(GK_data[[i]])) {
+    plot_comp <- ggbetweenstats(
+      data = GK_data,
+      x = Cluster,
+      y ={{ i }},
+      # palette = "Set3",
+      # package = "RColorBrewer",
+      title = paste("Comparativa de", i, "entre Clusters")
+    )
+  } else {
+    plot_comp <- ggbarstats(
+      data = GK_data,
+      y = Cluster,
+      x ={{ i }},
+      # palette = "Set3",
+      # package = "RColorBrewer",
+      title = paste("Comparativa de", i, "entre clusters")
+    )
+  }
+  
+  file_path <- paste0(Carpeta_comp, "Comparativa_", i, "_clusters_GK.png")
+  ggsave(file_path, plot = plot_comp, width = 14, height = 7)
+}
+```
+
+# Equipos
+
+```{r}
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Teams_data_clustered.csv", 
+    col_types = cols(Season_End_Year = col_character()))
+
+# Convertir la variable numérica en un factor con etiquetas "Cluster - 0" a "Cluster - n"
+variable_cluster <- factor(Teams_data$Cluster,
+                           levels = unique(Teams_data$Cluster), 
+                           labels = paste("Cluster -", unique(Teams_data$Cluster)))
+
+# Ver el resultado
+Teams_data$Cluster <- variable_cluster
+
+areas_Teams <- crear_graficos_radar(dataset = Teams_data, cluster_col = "Cluster", typedata = 3, output_dir = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Teams/")
+```
+
+```{r}
+# set.seed(410)  # Configurar una semilla para reproducibilidad
+data_subset <- subset(Teams_data, Teams_data$Squad == "Real Madrid")
+sampled_df <- sample_n(data_subset, 6); sampled_df[,c(1, 2, 61)]
+```
+
+```{r}
+# Preparar los datos para la matriz de recuento
+Teams_season_clusters <- Teams_data %>%
+  group_by(Squad) %>%
+  summarise(
+    n_clusters = n_distinct(Cluster),
+    n_seasons = n_distinct(Season_End_Year)
+  )
+
+# Crear la matriz de recuento
+count_matrix <- Teams_season_clusters %>%
+  count(n_clusters, n_seasons)
+
+# Calcular el percentil de corte
+percentile_corte <- quantile(count_matrix$n, 0.99)
+
+# Crear el gráfico de la matriz de recuento como objeto
+matrix_plot <- ggplot(count_matrix, aes(x = n_clusters, y = n_seasons, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n, color = ifelse(n > percentile_corte, "white", "black"))) +
+  scale_fill_gradient(low = "palegreen", high = "palegreen4") +
+  scale_color_identity() +
+  labs(
+    title = "Matriz Recuento Clusters-Temporadas",
+    x = "Nº de Clusters",
+    y = "Nº de Temporadas",
+    fill = "Nº de Jugadores"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.text = element_text(color = "grey20"),
+    axis.title = element_text(color = "grey20", size = 12)
+  )
+
+# Crear histogramas marginales con etiquetas
+x_marginal <- ggplot(Teams_season_clusters, aes(x = n_clusters)) +
+  geom_bar(fill = "springgreen4", color = "white") +
+  geom_text(stat = 'count', aes(label = ..count..), vjust = -0.5, color = "black") +
+  labs(x = "NºClústers") +
+  labs(y = "") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title.x = element_text(color = "grey20", size = 12),
+    axis.text.x = element_text(color = "grey20"),
+    plot.margin = unit(c(0, 0, 0, 0), "cm")
+  )
+
+y_marginal <- ggplot(Teams_season_clusters, aes(x = n_seasons)) +
+  geom_bar(fill = "springgreen4", color = "white") +
+  geom_text(stat = 'count', aes(label = ..count..), hjust = -0.1, color = "black") +
+  coord_flip() +
+  labs(y = "") +
+  labs(x = "NºTemp.") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title.y = element_text(color = "grey20", size = 12),
+    axis.text.y = element_text(color = "grey20"),
+    plot.margin = unit(c(0, 0, 0, 0), "cm")
+  )
+
+# Ajustar los tamaños relativos y combinar el gráfico principal con los gráficos marginales
+combined_plot <- plot_grid(
+  plot_grid(NULL, y_marginal, nrow = 2, rel_heights = c(0.2, 1)),
+  plot_grid(matrix_plot, x_marginal, ncol = 2, rel_widths = c(1, 0.2)),
+  ncol = 1,
+  rel_heights = c(0.2, 1)
+)
+
+# Guardar los gráficos como archivos PNG
+ggsave("hist_clusters_Team.png", 
+       plot = combined_plot, 
+       path = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Teams/Transiciones/", 
+       width = 8, 
+       height = 6)
+
+############################################################################################################
+############################################################################################################
+
+# Preparar datos para contar cambios de cluster
+data_4_count_Teams <- Teams_data %>%
+  arrange(Squad, Season_End_Year) %>%
+  group_by(Squad) %>%
+  mutate(Cluster_change = lag(Cluster))
+
+# Contar los cambios únicos entre Cluster_change y Cluster sin importar el jugador
+cluster_changes_Teams <- data_4_count_Teams %>%
+  filter(!is.na(Cluster_change) & Cluster != Cluster_change) %>%
+  count(Cluster_change, Cluster, name = "n") %>%
+  group_by(Cluster_change, Cluster) %>%
+  summarise(n = sum(n), .groups = 'drop')
+
+# Especificar el orden deseado de los clusters
+desired_order <- c("Cluster - 0", "Cluster - 1", "Cluster - 2", "Cluster - 3", "Cluster - 4", "Cluster - 5", "Cluster - 6")
+
+# Crear la visualización de cambios de cluster como objeto con degradado de color
+cluster_changes_plot <- ggplot(cluster_changes_Teams, 
+                               aes(x = factor(Cluster_change, levels = desired_order), 
+                                   y = factor(Cluster, levels = desired_order), 
+                                   size = n, 
+                                   fill = n)) +
+  geom_point(shape = 21, alpha = 0.7, color = "palegreen4") +
+  scale_size_continuous(range = c(2, 10), breaks = pretty(cluster_changes_Teams$n)) +
+  scale_fill_gradient(low = "palegreen", high = "palegreen4") +
+  labs(
+    title = "Cambios de Cluster",
+    x = "Cluster Anterior",
+    y = "Cluster Nuevo",
+    size = "Frecuencia de Cambios",
+    fill = "Frecuencia de Cambios"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.text = element_text(color = "grey20"),
+    axis.title = element_text(color = "grey20", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotar etiquetas del eje x
+    panel.grid.major = element_line(color = "grey80"),
+    panel.grid.minor = element_line(color = "grey90")
+  ) +
+  guides(size = guide_legend(order = 1), fill = guide_legend(order = 1))
+
+ggsave("cluster_changes_plot_Team.png", 
+       plot = cluster_changes_plot, 
+       path = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Teams/Transiciones/", 
+       width = 8, 
+       height = 6)
+```
+
+```{r}
+Carpeta_comp <- c("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/5. Clustering/Descriptiva/Teams/Identificadoras/")
+
+Teams_data_identify <- Teams_data[,c(1, 3)]
+
+colnames_Teams_id <- colnames(Teams_data_identify)
+
+# Definir el orden personalizado de los niveles del Cluster
+custom_order <- c("Cluster - 0",
+                  "Cluster - 1",
+                  "Cluster - 2",
+                  "Cluster - 3",
+                  "Cluster - 4",
+                  "Cluster - 5",
+                  "Cluster - 6")
+
+# Convertir Cluster en un factor con el orden personalizado
+Teams_data$Cluster <- factor(Teams_data$Cluster, levels = custom_order)
+
+for(i in colnames_Teams_id){
+  if(is.numeric(Teams_data[[i]])) {
+    plot_comp <- ggbetweenstats(
+      data = Teams_data,
+      x = Cluster,
+      y={{ i }},
+      # palette = "Set3",
+      # package = "RColorBrewer",
+      title = paste("Comparativa de", i, "entre Clusters")
+    )
+  } else {
+    plot_comp <- ggbarstats(
+      data = Teams_data,
+      y = Cluster,
+      x={{ i }},
+      # palette = "Set3",
+      # package = "RColorBrewer",
+      title = paste("Comparativa de", i, "entre clusters")
+    )
+  }
+  
+  file_path <- paste0(Carpeta_comp, "Comparativa_", i, "_clusters_Teams.png")
+  ggsave(file_path, plot = plot_comp, width = 14, height = 7)
+}
+```
+
+

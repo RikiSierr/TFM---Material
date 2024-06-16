@@ -1,0 +1,729 @@
+---
+title: "EDA PLAYERS TFM"
+author: "Ricard Sierra"
+date: '2024-04-05'
+output: html_document
+---
+
+```{r}
+if (!require("readr")) install.packages("readr", dependencies = TRUE)
+if (!require("tidyr")) install.packages("tidyr", dependencies = TRUE)
+if (!require("gridExtra")) install.packages("gridExtra", dependencies = TRUE)
+if (!require("grid")) install.packages("grid", dependencies = TRUE)
+if (!require("corrplot")) install.packages("corrplot", dependencies = TRUE)
+if (!require("ggplot2")) install.packages("ggplot2", dependencies = TRUE)
+if (!require("GGally")) install.packages("GGally", dependencies = TRUE)
+if (!require("factoextra")) install.packages("factoextra", dependencies = TRUE)
+if (!require("dplyr")) install.packages("dplyr", dependencies = TRUE)
+if (!require("ggrepel", quietly = TRUE)) install.packages("ggrepel", dependencies = TRUE)
+
+library(readr)
+library(tidyr)
+library(gridExtra)
+library(grid)
+library(corrplot)
+library(ggplot2)
+library(GGally)
+library(factoextra)
+library(dplyr)
+library(ggrepel)
+```
+
+# Funciones Analisis Automatico
+
+```{r}
+seleccion_variables <- function(data, file0_path, cat_name, var_explainded = 0.9) {
+  
+  
+  # data = data_playing_time[,9:(ncol(data_playing_time)-1)]
+  # file0_path = Carpeta_Players_General_Seleccion_TdJ
+  # cat_name = "TiempoDeJuego"
+               
+  # Generar identificadores únicos para cada variable
+  names(data) <- make.names(names(data), unique = TRUE)
+  
+  # Contar NAs por variable y calcular el total de entradas por variable
+  na_count <- sapply(data, function(x) sum(is.na(x)))
+  total_count <- sapply(data, function(x) length(x))
+  na_data <- data.frame(Variable = names(na_count), NAs = na_count, Total = total_count)
+  
+  # Calcular el porcentaje de NA's
+  na_data$PercNAs <- (na_data$NAs / na_data$Total) * 100
+  
+  # Ordenar de manera descendente por el porcentaje de NA's
+  na_data <- na_data[order(-na_data$PercNAs),]
+  
+  # Gráfica de porcentaje de NAs
+  na_plot <- ggplot(na_data, aes(x = reorder(Variable, -PercNAs), y = PercNAs)) +
+    geom_bar(stat = "identity", fill = 'steelblue') +
+    geom_text(aes(label = sprintf("%.1f%%", PercNAs)), hjust = 1.1, color = "black") +
+    labs(x = "Variable", y = "Porcentaje de NAs") +
+    theme_minimal() +
+    coord_flip() +
+    geom_hline(yintercept = 30, linetype = "dashed", color = "red", size = 1) +  # Línea horizontal roja (aparece vertical debido a coord_flip)
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 10))  # Escala de 0 a 100 con intervalos de 10
+
+  # Mostrar gráfico de NAs
+  print(na_plot)
+
+  
+  file_path <- paste0(file0_path, cat_name,"_na_plot.png")
+  ggsave(file_path, plot = na_plot, width = 13)
+
+  # Preparar datos (omitir NAs)
+  data_clean <- na.omit(data)
+  pca <- prcomp(data_clean, scale. = TRUE)
+  
+  # Calcular la varianza explicada acumulativa
+  explained_var <- cumsum(pca$sdev^2 / sum(pca$sdev^2))
+  
+  # Determinar las variables seleccionadas en base al 80% de varianza explicada
+  num_comp <- which(explained_var >= var_explainded)[1]
+  
+  # Guardar los nombres de todas las variables en orden de importancia hasta el corte
+  all_vars <- colnames(data_clean)[order(abs(pca$rotation[,1]), decreasing = TRUE)]
+  
+  # Seleccionar las top_vars más tres adicionales
+  additional_vars <- 3  # Número de variables adicionales a incluir
+  top_vars_plus <- all_vars[1:min(num_comp + additional_vars, length(all_vars))]
+  
+  # Crear un data frame para el gráfico
+  var_exp_df <- data.frame(Variable = all_vars, CumulativeVariance = explained_var[1:length(all_vars)])
+  
+  # Filtrar solo las top_vars más las tres adicionales
+  selected_vars_df <- var_exp_df[var_exp_df$Variable %in% top_vars_plus,]
+  
+  # Ordenar el data frame por la varianza explicada de forma descendente para las variables seleccionadas
+  selected_vars_df <- selected_vars_df[order(selected_vars_df$CumulativeVariance, decreasing = TRUE),]
+  
+  # Gráfico de Varianza Explicada con nombres de variables
+  ggplot(selected_vars_df, aes(x = reorder(Variable, CumulativeVariance), y = CumulativeVariance)) +
+      geom_line(group=1) + # Asegurarse de que todos los puntos estén conectados por líneas
+      geom_point() +
+      geom_hline(yintercept = var_explainded, linetype = "dashed", color = "red") +  # Línea horizontal roja
+      geom_vline(xintercept = num_comp, linetype = "dashed", color = "red") +  # Línea vertical azul
+      scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +  # Establecer límites de 0 a 1 (0 a 100%)
+      labs(x = "Variable Name", y = "Cumulative Variance Explained", title = "PCA Variance Explained") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1)) -> var_exp_plot
+  
+  # Mostrar gráfico de Varianza Explicada
+  print(var_exp_plot)
+
+
+  ggsave(paste0(file0_path, cat_name,"_var_exp_plot.png"), plot = var_exp_plot, width = 13)
+
+
+  # Verificar si hay suficientes datos para análisis
+  if (nrow(data_clean) < 3) {
+    stop("No hay suficientes datos para realizar el análisis después de eliminar NAs.")
+  }
+  
+  
+  # Matriz de Correlación
+  file_path <- paste0(file0_path, cat_name,"_corr_plot.png")
+
+  # Abrir un dispositivo gráfico PNG para guardar la imagen
+  png(file_path, width = 13*300, height = 13*300, res = 300)
+  
+  # Crear la matriz de correlación
+  correlacion <- cor(data_clean[, top_vars_plus], method = "spearman", use = "complete.obs")
+  
+  corrplot(correlacion, 
+           method = "color", 
+           type = "upper", 
+           order = "hclust",
+           tl.col = "black", 
+           tl.srt = 90, 
+           tl.cex = 1, 
+           number.cex = 1.5, 
+           addCoef.col = "black",
+           cl.lim = c(-1, 1))
+  
+  # Cerrar el dispositivo gráfico para guardar la imagen
+  dev.off()
+  
+  # ggsave(file_path, plot = corr_plot, width = 13)
+
+
+}
+
+
+descriptive_and_export_data_function <- function(data, file0_path, color_points = "skyblue", color_silhouette = "blue"){
+  
+  # data = data_porteria[,9:(ncol(data_porteria)-1)]
+  # file0_path = Carpeta_Players_Porteria_Porteria
+  # color_points = "lightpink1"
+  # color_silhouette = "deeppink2"
+  
+  for(var in 1:ncol(data)){
+    
+    var=1
+    var_name = colnames(data)[var]
+    
+    #Tabla Descriptiva
+    estadisticas_descriptivas <- data %>%
+      summarise(
+        Count = sum(!is.na((data[[var_name]]))),
+        Mean = round(mean(data[[var_name]], na.rm = TRUE), 2),
+        Median = round(median(data[[var_name]], na.rm = TRUE), 2),
+        SD = round(sd(data[[var_name]], na.rm = TRUE), 2),
+        Min = round(min(data[[var_name]], na.rm = TRUE), 2),
+        `1st Qu` = round(quantile(data[[var_name]], 0.25, na.rm = TRUE), 2),
+        `3rd Qu` = round(quantile(data[[var_name]], 0.75, na.rm = TRUE), 2),
+        Max = round(max(data[[var_name]], na.rm = TRUE), 2),
+        `% Missings` = round((sum(is.na(data[[var_name]]))/length(data[[var_name]]))*100,2),
+        Outliers = round(sum(data[[var_name]] < (quantile(data[[var_name]], 0.25, na.rm = TRUE) - 1.5 * IQR(data[[var_name]], na.rm = TRUE)) |
+                     data[[var_name]] > (quantile(data[[var_name]], 0.75, na.rm = TRUE) + 1.5 * IQR(data[[var_name]], na.rm = TRUE)), na.rm = TRUE),2)
+        ) %>%
+      pivot_longer(everything(), names_to = "Statistic", values_to = "Value")
+    
+    rownames(estadisticas_descriptivas) <- NULL
+    
+    estadisticas_descriptivas
+    
+    p <- tableGrob(estadisticas_descriptivas, rows = NULL, 
+                   theme = ttheme_minimal(
+                     base_size = 10, # Ajusta el tamaño de la fuente aquí
+                     core = list(fg_params = list(fontface = 1, fontsize = 10)), # Texto de las celdas
+                     colhead = list(fg_params = list(fontface = 2, fontsize = 11)), # Cabecera con negrita
+                     padding = unit(c(4, 4), "mm") # Ajusta el padding de las celdas
+                     ))
+    
+    # Convierte las dimensiones a milímetros
+    grob_width <- convertUnit(grobWidth(p), "cm", valueOnly = TRUE)
+    grob_height <- convertUnit(grobHeight(p), "cm", valueOnly = TRUE)
+    
+    # Asume que la resolución es de 300 ppi (puntos por pulgada)
+    res <- 1000
+    width_in_inches <- grob_width * 2
+    height_in_inches <- grob_height * 0.7
+
+    
+    file_path <- paste0(file0_path,var_name,"Table.png")
+    # Ajusta el tamaño de la imagen basado en las dimensiones en pulgadas y la resolución
+    png(file_path, width = width_in_inches, height = height_in_inches, res = res, units = "in")
+    grid.draw(p)
+    dev.off()
+    
+    
+    # Grafico
+    
+    data_filtrado <- data %>%
+      filter(!is.na(data[[var_name]]) & data[[var_name]] > 0 & is.finite(data[[var_name]]))
+    
+    # Calculando los límites para los outliers
+    iqr <- IQR(data_filtrado[[var_name]], na.rm = TRUE)
+    lower_bound <- quantile(data_filtrado[[var_name]], 0.25, na.rm = TRUE) - 1.5 * iqr
+    upper_bound <- quantile(data_filtrado[[var_name]], 0.75, na.rm = TRUE) + 1.5 * iqr
+    
+    # Separando los outliers para colorearlos de forma diferente
+    data_filtrado$outlier <- data_filtrado[[var_name]] < lower_bound | data_filtrado[[var_name]] > upper_bound
+    
+    # Calculando el rango de los datos
+    rango_datos <- max(data_filtrado[[var_name]], na.rm = TRUE) - min(data_filtrado[[var_name]], na.rm = TRUE)
+    
+    # Determina el número máximo deseado de marcas en el eje Y
+    max_breaks <- 10
+    
+    # Ajusta el tamaño del paso basado en el rango de datos y el número máximo de marcas
+    tamaño_paso_optimo <- rango_datos / max_breaks
+    
+    # Encuentra el siguiente "bonito" tamaño del paso para evitar números complejos
+    tamaño_paso <- 10^floor(log10(tamaño_paso_optimo)) # Base para el tamaño del paso
+    if (tamaño_paso_optimo / tamaño_paso >= 5) {
+      tamaño_paso <- tamaño_paso * 5
+    } else if (tamaño_paso_optimo / tamaño_paso >= 2) {
+      tamaño_paso <- tamaño_paso * 2
+    }
+    
+    # Asegurándose de que el tamaño del paso no sea 0 en caso de datos muy uniformes
+    tamaño_paso <- ifelse(tamaño_paso == 0, 1, tamaño_paso)
+
+    var_plot <- ggplot(data_filtrado, aes(x = factor(1), y = data_filtrado[[var_name]])) +
+      geom_violin(color = color_silhouette, fill = NA, alpha = 0.7, lwd = 0.5) +
+      geom_jitter(aes(color = outlier), width = 0.25, size = 1, alpha = 0.5, show.legend = FALSE) +
+      geom_boxplot(width = 0.1, fill = NA, color = "black", outlier.shape = NA) +
+      scale_color_manual(values = c("FALSE" = color_points, "TRUE" = "red")) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.y = element_line(color = "grey", size = 0.5),
+        panel.grid.minor.y = element_blank()
+        ) +
+      scale_y_continuous(
+        breaks = seq(floor(min(data_filtrado[[var_name]], na.rm = TRUE)), 
+                     ceiling(max(data_filtrado[[var_name]], na.rm = TRUE)), by = tamaño_paso)
+        ) + 
+      xlab(NULL) + 
+      ylab(NULL)
+    
+    print(var_plot)
+    
+    file_path <- paste0(file0_path,var_name,".png")
+    ggsave(file_path, plot = var_plot, width = 13)
+
+    
+
+  }
+}
+```
+
+# 1. Variables Jugadores
+
+## 1.1 Generales
+
+```{r}
+Carpeta_Players_General <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/General/"
+Carpeta_Players_General_Seleccion <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/General/Seleccion/"
+```
+
+
+### 1.1.1 Identificadoras
+
+```{r}
+data_playing_time <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_playing_time.csv", 
+                 col_types = cols(Season_End_Year = col_character()))
+
+Carpeta_Players_General_Identificadoras <- paste0(Carpeta_Players_General, "Identificadoras/")
+
+head(data_playing_time)
+
+colnames(data_playing_time)
+```
+
+**Player**
+```{r}
+num_jugadores_unicos <- length(unique(data_playing_time$Player))
+num_filas <- nrow(data_playing_time)
+
+# Puedes imprimir estos valores o usarlos en un título/gráfico según necesites
+print(paste("Número de Jugadores Únicos:", num_jugadores_unicos))
+print(paste("Número de Filas en el DataFrame:", num_filas))
+```
+
+**Season_End_Year**
+```{r}
+Season_End_Year_plot <- ggplot(data_playing_time, aes(x = as.factor(Season_End_Year))) +
+  geom_bar(stat = "count", fill = "skyblue", color = "black") +
+  geom_text(stat = 'count', aes(label = ..count..), vjust = -0.5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab(NULL) + 
+  ylab(NULL)
+
+file_path <- paste0(Carpeta_Players_General_Identificadoras, "SeasonEndYear.png")
+ggsave(file_path, plot = Season_End_Year_plot, width = 13)
+```
+
+**Comp**
+```{r}
+Comp_plot <- ggplot(data_playing_time, aes(x = Comp)) +
+  geom_bar(stat = "count", fill = "skyblue", color = "black") +
+  geom_text(stat = 'count', aes(label = ..count..), vjust = -0.5, color = "black") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab(NULL) + 
+  ylab(NULL)
+
+file_path <- paste0(Carpeta_Players_General_Identificadoras, "Comp.png")
+ggsave(file_path, plot = Comp_plot, width = 13)
+```
+
+**Nation**
+```{r}
+# Filtrando jugadores únicos por nacionalidad
+jugadores_unicos_nacionalidad <- data_playing_time %>%
+  select(Player, Nation) %>% # Seleccionamos solo las columnas necesarias
+  distinct() %>% # Filtramos jugadores únicos
+  count(Nation) %>% # Contamos cuántos jugadores únicos hay por nacionalidad
+  arrange(desc(n))
+
+# Calculando las top 9 nacionalidades y 'Otras'
+top_nacionalidades <- jugadores_unicos_nacionalidad %>%
+  mutate(Nation = ifelse(row_number() <= 9, Nation, "Otras")) %>%
+  group_by(Nation) %>%
+  summarise(n = sum(n), .groups = 'drop')
+
+# Calculando porcentajes
+top_nacionalidades$porcentaje <- top_nacionalidades$n / sum(top_nacionalidades$n) * 100
+
+# Gráfico de barras para las 9 nacionalidades más comunes + "Otras"
+Nation_plot <- ggplot(top_nacionalidades, aes(x = reorder(Nation, porcentaje), y = porcentaje)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  geom_text(aes(label = paste0(sprintf("%.1f", porcentaje), "%")), vjust = -0.5) +
+  theme_minimal() +
+  xlab(NULL) + 
+  ylab(NULL)
+
+file_path <- paste0(Carpeta_Players_General_Identificadoras, "Nation.png")
+ggsave(file_path, plot = Nation_plot, width = 13)
+```
+
+**Pos**
+```{r}
+# Asumiendo 'Pos' es la sexta columna
+Pos_plot <- data_playing_time %>%
+  count(Pos) %>%
+  ggplot(aes(x = reorder(Pos, n), y = n)) +
+  geom_col(fill = "skyblue") +
+  geom_text(aes(label = n), vjust = -0.3) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  xlab(NULL) + 
+  ylab(NULL)
+
+file_path <- paste0(Carpeta_Players_General_Identificadoras, "Pos.png")
+ggsave(file_path, plot = Pos_plot, width = 13)
+```
+
+**Age**
+```{r}
+estadisticas_descriptivas <- data_playing_time %>%
+  summarise(
+    Count = sum(!is.na(Age)),
+    Mean = round(mean(Age, na.rm = TRUE), 2),
+    Median = round(median(Age, na.rm = TRUE), 2),
+    SD = round(sd(Age, na.rm = TRUE), 2),
+    Min = round(min(Age, na.rm = TRUE), 2),
+    `1st Qu` = round(quantile(Age, 0.25, na.rm = TRUE), 2),
+    `3rd Qu` = round(quantile(Age, 0.75, na.rm = TRUE), 2),
+    Max = round(max(Age, na.rm = TRUE), 2),
+    `% Missings` = round((sum(is.na(Age))/length(Age))*100,2),
+    Outliers = round(sum(Age < (quantile(Age, 0.25, na.rm = TRUE) - 1.5 * IQR(Age, na.rm = TRUE)) |
+                 Age > (quantile(Age, 0.75, na.rm = TRUE) + 1.5 * IQR(Age, na.rm = TRUE)), na.rm = TRUE),2)
+  ) %>%
+  pivot_longer(everything(), names_to = "Statistic", values_to = "Value")
+
+estadisticas_descriptivas
+```
+
+```{r}
+rownames(estadisticas_descriptivas) <- NULL
+
+# Ahora crea el 'tableGrob' sin los números de índice
+p <- tableGrob(estadisticas_descriptivas, rows = NULL, 
+               theme = ttheme_minimal(
+                 base_size = 10, # Ajusta el tamaño de la fuente aquí
+                 core = list(fg_params = list(fontface = 1, fontsize = 10)), # Texto de las celdas
+                 colhead = list(fg_params = list(fontface = 2, fontsize = 11)), # Cabecera con negrita
+                 padding = unit(c(4, 4), "mm") # Ajusta el padding de las celdas
+               ))
+
+# Convierte las dimensiones a milímetros
+grob_width <- convertUnit(grobWidth(p), "cm", valueOnly = TRUE)
+grob_height <- convertUnit(grobHeight(p), "cm", valueOnly = TRUE)
+
+# Asume que la resolución es de 300 ppi (puntos por pulgada)
+res <- 1000
+width_in_inches <- grob_width * 2
+height_in_inches <- grob_height * 0.7
+
+file_path <- paste0(Carpeta_Players_General_Identificadoras, "AgeTable.png")
+
+# Ajusta el tamaño de la imagen basado en las dimensiones en pulgadas y la resolución
+png(file_path, width = width_in_inches, height = height_in_inches, res = res, units = "in")
+grid.draw(p)
+dev.off()
+```
+
+
+```{r}
+# Filtrando la columna Age para remover valores no finitos
+data_playing_time_filtrado <- data_playing_time %>%
+  filter(!is.na(Age) & Age > 0 & is.finite(Age))
+
+# Calculando los límites para los outliers
+iqr <- IQR(data_playing_time_filtrado$Age, na.rm = TRUE)
+lower_bound <- quantile(data_playing_time_filtrado$Age, 0.25, na.rm = TRUE) - 1.5 * iqr
+upper_bound <- quantile(data_playing_time_filtrado$Age, 0.75, na.rm = TRUE) + 1.5 * iqr
+
+# Separando los outliers para colorearlos de forma diferente
+data_playing_time_filtrado$outlier <- data_playing_time_filtrado$Age < lower_bound | data_playing_time_filtrado$Age > upper_bound
+
+# Creando el gráfico combinado de caja y violín para 'Age' con el dataframe filtrado  
+Age_plot <- ggplot(data_playing_time_filtrado, aes(x = factor(1), y = Age)) +
+  geom_violin(color = "blue", fill = NA, alpha = 0.7, lwd = 0.5) + # Solo se muestra el contorno del violín
+  geom_jitter(aes(color = outlier), width = 0.25, size = 1, alpha = 0.5, show.legend = FALSE) + # Puntos semi-transparentes y outliers coloreados
+  geom_boxplot(width = 0.1, fill = NA, color = "black", outlier.shape = NA) + # Boxplot sin outliers
+  scale_color_manual(values = c("FALSE" = "skyblue", "TRUE" = "red")) + # Colores para los puntos, incluyendo outliers
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey", size = 0.5),
+    panel.grid.minor.y = element_blank()
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, max(data_playing_time_filtrado$Age, na.rm = TRUE), by = 5) # Ajustando las marcas del eje Y a múltiplos de 5
+  ) + 
+  xlab(NULL) + 
+  ylab(NULL)
+
+Age_plot
+
+file_path <- paste0(Carpeta_Players_General_Identificadoras, "Age.jpg")
+ggsave(file_path, plot = Age_plot, width = 13)
+```
+
+
+<br>
+
+
+
+
+### 1.1.2 Tiempo de juego
+
+```{r}
+data_playing_time <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_playing_time.csv", 
+                 col_types = cols(Season_End_Year = col_character()))
+
+dim(data_playing_time)
+```
+
+```{r}
+Carpeta_Players_General_TdJ <- paste0(Carpeta_Players_General,"Tiempo de Juego/")
+Carpeta_Players_General_Seleccion_TdJ <- paste0(Carpeta_Players_General_Seleccion,"Tiempo de Juego/")
+
+seleccion_variables(data = data_playing_time[,9:(ncol(data_playing_time)-1)],
+               file0_path = Carpeta_Players_General_Seleccion_TdJ, 
+               cat_name = "TiempoDeJuego")
+
+descriptive_and_export_data_function(data = data_playing_time[,9:(ncol(data_playing_time)-1)],
+                                     file0_path = Carpeta_Players_General_TdJ, 
+                                     color_points = "skyblue",
+                                     color_silhouette = "blue")
+```
+
+
+
+### 1.1.3 MISC
+```{r}
+data_misc <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_misc.csv")
+dim(data_misc)
+```
+
+```{r}
+Carpeta_Players_General_Seleccion_MISC <- paste0(Carpeta_Players_General_Seleccion,"MISC/")
+Carpeta_Players_General_MISC <- paste0(Carpeta_Players_General,"MISC/")
+
+seleccion_variables(data = data_misc[,10:(ncol(data_misc)-1)],
+               file0_path = Carpeta_Players_General_Seleccion_MISC, 
+               cat_name = "MISC")
+
+descriptive_and_export_data_function(data = data_misc[,9:(ncol(data_misc)-1)], 
+                                     file0_path = Carpeta_Players_General_MISC, 
+                                     color_points = "skyblue",
+                                     color_silhouette = "blue")
+```
+
+
+<br>
+
+## 1.2 Ataque
+
+```{r}
+Carpeta_Players_Ataque <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/Ataque/"
+Carpeta_Players_Ataque_Seleccion <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/Ataque/Seleccion/"
+```
+
+### 1.2.1 Tiros
+
+```{r}
+data_tiros <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_shooting.csv")
+dim(data_tiros)
+```
+
+```{r}
+Carpeta_Players_Ataque_Seleccion_Tiros <- paste0(Carpeta_Players_Ataque_Seleccion,"Tiros/")
+Carpeta_Players_Ataque_Tiros <- paste0(Carpeta_Players_Ataque,"Tiros/")
+
+seleccion_variables(data = data_tiros[,10:(ncol(data_tiros)-1)],
+               file0_path = Carpeta_Players_Ataque_Seleccion_Tiros, 
+               cat_name = "Tiros")
+
+descriptive_and_export_data_function(data = data_tiros[,10:(ncol(data_tiros)-1)], 
+                                     file0_path = Carpeta_Players_Ataque_Tiros, 
+                                     color_points = "mediumpurple",
+                                     color_silhouette = "purple4")
+```
+
+
+### 1.2.2 Creación de Oportunidades
+
+```{r}
+data_gca <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_gca.csv")
+dim(data_gca)
+```
+
+```{r}
+Carpeta_Players_Ataque_Seleccion_GcA <- paste0(Carpeta_Players_Ataque_Seleccion,"Creacion de Oportunidades/")
+Carpeta_Players_Ataque_GcA <- paste0(Carpeta_Players_Ataque,"Creacion de Oportunidades/")
+
+seleccion_variables(data = data_gca[,10:(ncol(data_gca)-1)],
+                    file0_path = Carpeta_Players_Ataque_Seleccion_GcA,
+                    cat_name = "CreacionOportunidades")
+
+descriptive_and_export_data_function(data = data_gca[,10:(ncol(data_gca)-1)],
+                                     file0_path = Carpeta_Players_Ataque_GcA, 
+                                     color_points = "mediumpurple",
+                                     color_silhouette = "purple4")
+```
+
+<br>
+
+## 1.3 Transiciones
+
+```{r}
+Carpeta_Players_Transiciones <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/Transiciones/"
+Carpeta_Players_Transiciones_Seleccion <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/Transiciones/Seleccion/"
+```
+
+### 1.3.1 Pases
+
+```{r}
+data_pases <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_passing.csv")
+dim(data_pases)
+```
+
+```{r}
+Carpeta_Players_Transiciones_Seleccion_Pases <- paste0(Carpeta_Players_Transiciones_Seleccion,"Pases/")
+Carpeta_Players_Transiciones_Pases <- paste0(Carpeta_Players_Transiciones,"Pases/")
+
+seleccion_variables(data = data_pases[,10:(ncol(data_pases)-1)],
+                    file0_path = Carpeta_Players_Transiciones_Seleccion_Pases,
+                    cat_name = "Pases")
+
+descriptive_and_export_data_function(data = data_pases[,10:(ncol(data_pases)-1)],
+                                     file0_path = Carpeta_Players_Transiciones_Pases, 
+                                     color_points = "palegreen",
+                                     color_silhouette = "green4")
+```
+
+
+### 1.3.2 Tipos de Pases
+
+```{r}
+data_tipopases <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_passing_types.csv")
+dim(data_tipopases)
+```
+
+```{r}
+Carpeta_Players_Transiciones_Seleccion_TiposPases <- paste0(Carpeta_Players_Transiciones_Seleccion,"Tipos de Pases/")
+Carpeta_Players_Transiciones_TiposPases <- paste0(Carpeta_Players_Transiciones,"Tipos de Pases/")
+
+seleccion_variables(data = data_tipopases[,10:(ncol(data_tipopases)-1)],
+                    file0_path = Carpeta_Players_Transiciones_Seleccion_TiposPases,
+                    cat_name = "TiposPases")
+
+descriptive_and_export_data_function(data = data_tipopases[,10:(ncol(data_tipopases)-1)],
+                                     file0_path = Carpeta_Players_Transiciones_TiposPases, 
+                                     color_points = "palegreen",
+                                     color_silhouette = "green4")
+```
+
+
+### 1.3.3 Possesión
+
+```{r}
+data_posesion <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_possession.csv")
+dim(data_posesion)
+```
+
+```{r}
+Carpeta_Players_Transiciones_Seleccion_Posesion <- paste0(Carpeta_Players_Transiciones_Seleccion,"Posesion/")
+Carpeta_Players_Transiciones_Posesion <- paste0(Carpeta_Players_Transiciones,"Posesion/")
+
+seleccion_variables(data = data_posesion[,10:(ncol(data_posesion)-1)],
+                    file0_path = Carpeta_Players_Transiciones_Seleccion_Posesion,
+                    cat_name = "Posesion")
+
+descriptive_and_export_data_function(data = data_posesion[,10:(ncol(data_posesion)-1)],
+                                     file0_path = Carpeta_Players_Transiciones_Posesion, 
+                                     color_points = "palegreen",
+                                     color_silhouette = "green4")
+```
+
+
+<br>
+
+## 1.4 Defensa
+
+```{r}
+Carpeta_Players_Defensa <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/Defensa/"
+Carpeta_Players_Defensa_Seleccion <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/Defensa/Seleccion/"
+```
+
+### 1.4.1 Acciones Defensivas
+
+```{r}
+data_defense <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_defense.csv")
+dim(data_defense)
+```
+
+```{r}
+Carpeta_Players_Defensa_Seleccion_AccionesDefensivas <- paste0(Carpeta_Players_Defensa_Seleccion,"Acciones Defensivas/")
+Carpeta_Players_Defensa_AccionesDefensivas <- paste0(Carpeta_Players_Defensa,"Acciones Defensivas/")
+
+seleccion_variables(data = data_defense[,10:(ncol(data_defense)-1)],
+                    file0_path = Carpeta_Players_Defensa_Seleccion_AccionesDefensivas,
+                    cat_name = "Acciones Defensivas")
+
+descriptive_and_export_data_function(data = data_defense[,10:(ncol(data_defense)-1)],
+                                     file0_path = Carpeta_Players_Defensa_AccionesDefensivas, 
+                                     color_points = "tan1",
+                                     color_silhouette = "wheat2")
+```
+
+
+<br>
+
+
+## 1.5 Porteria
+
+```{r}
+Carpeta_Players_Porteria <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/Porteria/"
+Carpeta_Players_Porteria_Seleccion <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Players/Porteria/Seleccion/"
+```
+
+```{r}
+data_porteria_basica <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_keepers.csv")
+data_porteri_avanzada <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_keepers_adv.csv")
+```
+
+```{r}
+# Nombres de columnas para la unión
+colnames_4_union <- colnames(data_porteria_basica)[1:8]
+
+# Eliminar columnas duplicadas que no son parte de la unión
+for (col_name in setdiff(names(data_porteria_basica), colnames_4_union)) {
+  if (col_name %in% names(data_porteri_avanzada) && all(data_porteria_basica[[col_name]] == data_porteri_avanzada[[col_name]], na.rm = TRUE)) {
+    data_porteria_basica[[col_name]] <- NULL  # Elimina la columna si los valores son iguales
+  }
+}
+
+# Realizar la fusión
+data_porteria <- merge(data_porteria_basica, data_porteri_avanzada, by = colnames_4_union)
+data_porteria$GA_Goals <- NULL
+
+# Ver el resultado
+colnames(data_porteria)
+```
+
+```{r}
+Carpeta_Players_Porteria_Seleccion_Porteria <- paste0(Carpeta_Players_Porteria_Seleccion)
+Carpeta_Players_Porteria_Porteria <- paste0(Carpeta_Players_Porteria,"Porteria/")
+
+seleccion_variables(data = data_porteria[,9:(ncol(data_porteria)-1)],
+                    file0_path = Carpeta_Players_Porteria_Seleccion_Porteria,
+                    cat_name = "Porteria")
+
+descriptive_and_export_data_function(data = data_porteria[,9:(ncol(data_porteria)-1)],
+                                     file0_path = Carpeta_Players_Porteria_Porteria, 
+                                     color_points = "lightpink1",
+                                     color_silhouette = "deeppink2")
+```
+
+
+

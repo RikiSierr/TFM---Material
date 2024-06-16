@@ -1,0 +1,104 @@
+---
+title: "¿Hay diferencia entre las ligas?"
+author: "Ricard Sierra"
+date: '2024-05-10'
+output: html_document
+---
+
+```{r}
+if (!require('readr')) install.packages('readr', dependencies=TRUE)
+if (!require('dplyr')) install.packages('dplyr', dependencies=TRUE)
+if (!require('ggstatsplot')) install.packages('ggstatsplot', dependencies=TRUE)
+if (!require('ggplot2')) install.packages('ggplot2', dependencies=TRUE)
+
+library(readr)
+library(dplyr)
+library(ggstatsplot)
+library(ggplot2)
+```
+
+
+```{r}
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Teams_data.csv")
+head(Teams_data)
+```
+
+**Paso 1: Convertir las columnas seleccionadas a percentiles**
+```{r}
+# Función para convertir a percentiles
+convert_to_percentile <- function(column) {
+  return(ecdf(column)(column) * 100)
+}
+
+# Aplicar la función a las columnas con sufijos específicos
+sufijos <- c("_Ataque", "_Defensa", "_Transiciones", "_Porteria", "_General")
+columns_to_process <- names(Teams_data)[sapply(names(Teams_data), function(x) any(sapply(sufijos, function(y) grepl(y, x))))]
+
+Teams_data[, columns_to_process] <- lapply(Teams_data[, columns_to_process, drop = FALSE], convert_to_percentile)
+```
+
+**Paso 2: Agrupar por sufijo y calcular medias**
+```{r}
+# Calcular medias para cada grupo de sufijo
+for(sufijo in sufijos) {
+  columnas_sufijo <- grep(sufijo, names(Teams_data), value = TRUE)
+  Teams_data[[paste0("Media", sufijo)]] <- rowMeans(Teams_data[, columnas_sufijo, drop = FALSE])
+}
+```
+
+**Paso 3: Crear un nuevo DataFrame con las columnas sin sufijo y las nuevas medias de los sufijos**
+```{r}
+# Seleccionar columnas sin sufijo y nuevas medias
+columnas_sin_sufijo <- names(Teams_data)[!sapply(names(Teams_data), function(x) any(sapply(sufijos, function(y) grepl(y, x))))]
+Teams_data_final <- Teams_data[, c(columnas_sin_sufijo, grep("Media", names(Teams_data), value = TRUE))]
+```
+
+
+
+
+```{r}
+Carpeta_comp <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/Comparativa Ligas/"
+medias_grupos <- colnames(Teams_data_final)[4:8]
+
+# Asumiendo que ya tienes cargado ggpubr y otros paquetes necesarios
+for (i in medias_grupos) {
+  
+  # Calcula valores medios y medianos para ajustes
+  media <- mean(Teams_data_final[[i]])
+  mediana <- median(Teams_data_final[[i]])
+  nudge_y <- ifelse(abs(media - mediana) < quantile(Teams_data_final[[i]], probs = 0.1), 0.05, 0)
+
+  pmean <- ggbetweenstats(
+    Teams_data_final,
+    y={{ i }},
+    x=Comp,
+    type="parametric",
+    centrality.label.args = list(nudge_x = -0.3, nudge_y = nudge_y), # Ajusta aquí según sea necesario
+    title = paste("Comparativa de ligas según:", i),
+    package="ggthemes", palette = "Purple_Pink_Gray",
+    title.size = 30, text.size = 30, pvalue.size = 25
+    ) + ylim(0, 100)  # Ajusta los límites del eje y
+
+  pmedian <- ggbetweenstats(
+    Teams_data_final,
+    y={{ i }},
+    x=Comp,
+    type="nonparametric",
+    centrality.label.args = list(nudge_x = 0.3, nudge_y = -nudge_y), # Ajusta aquí según sea necesario
+    title = paste("Comparativa de ligas según:", i),
+    package="ggthemes", palette = "Purple_Pink_Gray",
+    title.size = 30, text.size = 30, pvalue.size = 25
+    ) + ylim(0, 100)  # Ajusta los límites del eje y
+
+  pmedian$layers[[6]] <- pmean$layers[[4]]
+  pmedian$layers[[7]] <- pmean$layers[[5]]
+  
+  file_path <- paste0(Carpeta_comp, "Comparativa_ligas", i, ".png")
+  ggsave(file_path, plot = pmedian, width = 14, height = 7)
+  
+  print(pmedian)
+}
+
+```
+
+

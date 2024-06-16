@@ -1,0 +1,821 @@
+---
+title: "Consolidación de Dataframes"
+author: "Ricard Sierra"
+date: '2024-05-06'
+output: html_document
+---
+
+```{r}
+library(readr)
+
+if (!require(DMwR)) install.packages("DMwR", dependencies=TRUE)
+if (!require(caret)) install.packages("caret", dependencies=TRUE)
+if (!require(mice)) install.packages("mice", dependencies=TRUE)
+if (!require(dplyr)) install.packages("dplyr", dependencies=TRUE)
+# if (!require(VIM)) install.packages("VIM", dependencies=TRUE)
+
+if (!require(VIM)) {
+    install.packages("VIM")
+    library(VIM)
+}
+
+library(DMwR2)
+library(mice)
+library(caret)
+library(dplyr)
+#   library(VIM)
+```
+
+
+# Players
+```{r}
+vars_identificadoras_players <- c("Season_End_Year", "Squad", "Comp", "Player", "Nation", "Pos", "Age")
+```
+
+
+## Generales
+```{r}
+# Tiempo de Juego
+data_playing_time_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_playing_time.csv",
+                                    col_types = cols(Season_End_Year = col_character()))
+
+vars_playing_time_players <- c("Min_Playing.Time", 
+                               "Min_percent_Playing.Time", 
+                               "onxG_Team.Success..xG.", 
+                               "onG_Team.Success", 
+                               "onxGA_Team.Success..xG", 
+                               "Compl_Starts", 
+                               "MP_Playing.Time")
+
+data_playing_time_players_select <- data_playing_time_players[,c(vars_identificadoras_players, vars_playing_time_players)]
+
+names(data_playing_time_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_playing_time_players_select))] <- paste(names(data_playing_time_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_playing_time_players_select))], "_Generales", sep = "")
+
+###################################################################################################################################################
+###################################################################################################################################################
+
+# MISC
+data_misc_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_misc.csv")
+
+vars_misc_players <- c("Recov",
+                       "Fls",
+                       "TklW",
+                       "CrdY",
+                       "2CrdY",
+                       "CrdR",
+                       "Crs",
+                       "Won_Aerial",
+                       "Lost_Aerial")
+
+
+data_misc_players_select <- data_misc_players[,c(vars_identificadoras_players, vars_misc_players)]
+
+data_misc_players_select <- data_misc_players_select %>%
+  mutate(CrdY = if_else(is.na(CrdY), 0, CrdY)) %>%
+  mutate(`2CrdY` = if_else(is.na(`2CrdY`), 0, `2CrdY`)) %>%
+  mutate(CrdR = if_else(is.na(CrdR), 0, CrdR))
+
+
+data_misc_players_select$indiscipline_index <- data_misc_players_select$CrdY + 3 * data_misc_players_select$`2CrdY` + 4 * data_misc_players_select$CrdR
+
+data_misc_players_select$Aerial_compose_Index <- ifelse(data_misc_players_select$Won_Aerial + data_misc_players_select$Lost_Aerial == 0,
+                                                        0,
+                                                        (data_misc_players_select$Won_Aerial / (data_misc_players_select$Won_Aerial + data_misc_players_select$Lost_Aerial)) * log(1 + data_misc_players_select$Won_Aerial + data_misc_players_select$Lost_Aerial))
+
+data_misc_players_select <- data_misc_players_select[, !(names(data_misc_players_select) %in% c("CrdY", "2CrdY", "CrdR", "Won_Aerial", "Lost_Aerial"))]
+
+names(data_misc_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_misc_players_select))] <- paste(names(data_misc_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_misc_players_select))], "_Generales", sep = "")
+```
+
+## Ataque
+```{r}
+# Tiros
+data_tiros_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_shooting.csv")
+
+vars_tiros_select <- c("Gls_Standard",
+                       "Sh_Standard",
+                       "SoT_percent_Standard",
+                       "npxG_Expected",
+                       "PK_Standard",
+                       "PKatt_Standard",
+                       "Sh_per_90_Standard",
+                       "FK_Standard",
+                       "np:G_minus_xG_Expected")
+
+data_tiros_players_select <- data_tiros_players[,c(vars_identificadoras_players, vars_tiros_select)]
+
+# Suponiendo que tu dataframe se llama data_tiros_players_select
+# Crear la nueva variable Pk_Eff
+data_tiros_players_select$Pk_Eff <- ifelse(data_tiros_players_select$PKatt_Standard == 0, 
+                                           0, 
+                                           data_tiros_players_select$PK_Standard / data_tiros_players_select$PKatt_Standard)
+
+
+data_tiros_players_select <- data_tiros_players_select[, !(names(data_tiros_players_select) %in% c("PKatt_Standard", "PK_Standard"))]
+
+names(data_tiros_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_tiros_players_select))] <- paste(names(data_tiros_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_tiros_players_select))], "_Ataque", sep = "")
+
+###################################################################################################################################################
+###################################################################################################################################################
+
+# Creación de Oportunidades
+data_gca_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_gca.csv")
+
+vars_gca_select <- c("SCA_SCA",
+                     "GCA_GCA", # Eliminar
+                     "TO_SCA",
+                     "Sh_SCA",
+                     "Sh_GCA", # Eliminar
+                     "Fld_SCA",
+                     "Fld_GCA", # Eliminar
+                     "PassDead_SCA",
+                     "Def_SCA")
+
+data_gca_players_select <- data_gca_players[,c(vars_identificadoras_players, vars_gca_select)]
+
+data_gca_players_select$Eff_SCA_GCA <- ifelse(data_gca_players_select$SCA_SCA == 0, 
+                                           0, 
+                                           data_gca_players_select$GCA_GCA / data_gca_players_select$SCA_SCA)
+
+data_gca_players_select$Eff_Sh_SCA_GCA <- ifelse(data_gca_players_select$Sh_SCA == 0, 
+                                           0, 
+                                           data_gca_players_select$Sh_GCA / data_gca_players_select$Sh_SCA)
+
+data_gca_players_select$Eff_Fld_SCA_GCA <- ifelse(data_gca_players_select$Fld_SCA == 0, 
+                                           0, 
+                                           data_gca_players_select$Fld_GCA / data_gca_players_select$Fld_SCA)
+
+
+data_gca_players_select <- data_gca_players_select[, !(names(data_gca_players_select) %in% c("GCA_GCA", "Sh_GCA", "Fld_GCA"))]
+
+names(data_gca_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_gca_players_select))] <- paste(names(data_gca_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_gca_players_select))], "_Ataque", sep = "")
+
+```
+
+## Transiciones
+```{r}
+# Pases
+data_pases_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_passing.csv")
+
+vars_pases_players <- c("Att_Total",
+                        "Cmp_percent_Total",
+                        "Cmp_percent_Short",
+                        "Cmp_percent_Medium",
+                        "Cmp_percent_Long",
+                        "TotDist_Total", # Eliminar
+                        "Cmp_Total", # Eliminar
+                        "PrgP")
+
+data_pases_players_select <- data_pases_players[,c(vars_identificadoras_players, vars_pases_players)]
+
+data_pases_players_select$MeanDist_Total <- ifelse(data_pases_players_select$Cmp_Total == 0, 
+                                           0, 
+                                           data_pases_players_select$TotDist_Total / data_pases_players_select$Cmp_Total)
+
+data_pases_players_select <- data_pases_players_select[, !(names(data_pases_players_select) %in% c("TotDist_Total", "Cmp_Total"))]
+
+names(data_pases_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_pases_players_select))] <- paste(names(data_pases_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_pases_players_select))], "_Transiciones", sep = "")
+
+###################################################################################################################################################
+###################################################################################################################################################
+
+# Tipos de pases
+
+data_tipopases_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_passing_types.csv")
+
+vars_tipopases_players <- c("Live_Pass",
+                            "Off_Outcomes",
+                            "Blocks_Outcomes",
+                            "CK_Pass",
+                            "Sw_Pass")
+
+data_tipopases_players_select <- data_tipopases_players[,c(vars_identificadoras_players, vars_tipopases_players)]
+
+names(data_tipopases_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_tipopases_players_select))] <- paste(names(data_tipopases_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_tipopases_players_select))], "_Transiciones", sep = "")
+
+###################################################################################################################################################
+###################################################################################################################################################
+
+# Posesion
+data_posesion_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_possession.csv")
+
+vars_posesion_players <- c("Final_Third_Carries",
+                           "PrgC_Carries",
+                           "TotDist_Carries",
+                           "Att_Take",
+                           "Succ_percent_Take",
+                           "Touches_Touches", # Eliminar
+                           "Def Pen_Touches", # Eliminar
+                           "Def 3rd_Touches", # Eliminar
+                           "Mid 3rd_Touches", # Eliminar
+                           "Att 3rd_Touches", # Eliminar
+                           "Att Pen_Touches" # Eliminar
+                           )
+
+data_posesion_players_select <- data_posesion_players[,c(vars_identificadoras_players, vars_posesion_players)]
+
+data_posesion_players_select$Frac_DefPen_Touches <- ifelse(data_posesion_players_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_players_select$`Def Pen_Touches` / data_posesion_players_select$Touches_Touches) 
+
+data_posesion_players_select$Frac_Def3rd_Touches <- ifelse(data_posesion_players_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_players_select$`Def 3rd_Touches` / data_posesion_players_select$Touches_Touches) 
+
+data_posesion_players_select$Frac_Mid3rd_Touches <- ifelse(data_posesion_players_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_players_select$`Mid 3rd_Touches` / data_posesion_players_select$Touches_Touches) 
+
+data_posesion_players_select$Frac_Att3rd_Touches <- ifelse(data_posesion_players_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_players_select$`Att 3rd_Touches` / data_posesion_players_select$Touches_Touches) 
+
+data_posesion_players_select$Frac_AttPen_Touches <- ifelse(data_posesion_players_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_players_select$`Att Pen_Touches` / data_posesion_players_select$Touches_Touches) 
+
+data_posesion_players_select <- data_posesion_players_select[, !(names(data_posesion_players_select) %in% c("Touches_Touches",  "Def Pen_Touches", "Def 3rd_Touches", "Mid 3rd_Touches", "Att 3rd_Touches",  "Att Pen_Touches"))]
+
+names(data_posesion_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_posesion_players_select))] <- paste(names(data_posesion_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_posesion_players_select))], "_Transiciones", sep = "")
+
+```
+
+## Defensa
+```{r}
+# Acciones Defensivas
+
+data_defense_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_defense.csv")
+
+vars_defense_players <- c("Tkl+Int",
+                          "Att_Challenges",
+                          "Blocks_Blocks",
+                          "Tkl_Tackles", # Eliminar
+                          "Def 3rd_Tackles",  # Eliminar
+                          "Mid 3rd_Tackles",  # Eliminar
+                          "Att 3rd_Tackles")  # Eliminar
+
+data_defense_players_select <- data_defense_players[,c(vars_identificadoras_players, vars_defense_players)]
+
+data_defense_players_select$Frac_Def3rd_Tackles <- ifelse(data_defense_players_select$Tkl_Tackles == 0, 
+                                           0, 
+                                           data_defense_players_select$`Def 3rd_Tackles` / data_defense_players_select$Tkl_Tackles) 
+
+data_defense_players_select$Frac_Mid3rd_Tackles <- ifelse(data_defense_players_select$Tkl_Tackles == 0, 
+                                           0, 
+                                           data_defense_players_select$`Mid 3rd_Tackles` / data_defense_players_select$Tkl_Tackles) 
+
+data_defense_players_select$Frac_Att3rd_Tackles <- ifelse(data_defense_players_select$Tkl_Tackles == 0, 
+                                           0, 
+                                           data_defense_players_select$`Att 3rd_Tackles` / data_defense_players_select$Tkl_Tackles) 
+
+data_defense_players_select <- data_defense_players_select[, !(names(data_defense_players_select) %in% c("Tkl_Tackles", "Def 3rd_Tackles", "Mid 3rd_Tackles", "Att 3rd_Tackles"))]
+
+names(data_defense_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_defense_players_select))] <- paste(names(data_defense_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_defense_players_select))], "_Defensa", sep = "")
+
+```
+
+## Porteria
+```{r}
+data_porteria_basica_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_keepers.csv")
+data_porteria_avanzada_players <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Players/big5_players_keepers_adv.csv")
+
+# Nombres de columnas para la unión
+colnames_4_union_players <- colnames(data_porteria_basica_players)[1:8]
+
+# Eliminar columnas duplicadas que no son parte de la unión
+for (col_name in setdiff(names(data_porteria_basica_players), colnames_4_union_players)) {
+  if (col_name %in% names(data_porteria_avanzada_players) && all(data_porteria_basica_players[[col_name]] == data_porteria_avanzada_players[[col_name]], na.rm = TRUE)) {
+    data_porteria_basica_players[[col_name]] <- NULL  # Elimina la columna si los valores son iguales
+  }
+}
+
+# Realizar la fusión
+data_porteria_players <- merge(data_porteria_basica_players, data_porteria_avanzada_players, by = colnames_4_union_players)
+data_porteria_players$GA_Goals <- NULL
+
+vars_porteria_players <- c("Mins_Per_90",
+                           "Stp_percent_Crosses", # Eliminar
+                           "Opp_Crosses", # Eliminar
+                           "Save_percent", # Eliminar
+                           "SoTA", # Eliminar
+                           "PSxG+_per__minus__Expected", # Eliminar
+                           "PSxG_Expected", # Eliminar
+                           "Att (GK)_Passes",
+                           "Cmp_percent_Launched", # Eliminar
+                           "Att_Launched", # Eliminar
+                           "#OPA_per_90_Sweeper",
+                           "Save_percent_Penalty",  # Eliminar
+                           "PKatt_Penalty")  # Eliminar
+
+data_porteria_players_select <- data_porteria_players[,c(vars_identificadoras_players, vars_porteria_players)]
+
+data_porteria_players_select$Stp_crosses_compose_index <- data_porteria_players_select$Stp_percent_Crosses * log(1 + data_porteria_players_select$Opp_Crosses)
+
+
+data_porteria_players_select$Save_compose_index <- data_porteria_players_select$Save_percent * log(1 + data_porteria_players_select$SoTA)
+
+data_porteria_players_select$PSxG_compose_index <- ifelse(data_porteria_players_select$PSxG_Expected == 0, 
+                                           0, 
+                                           data_porteria_players_select$`PSxG+_per__minus__Expected` / data_porteria_players_select$PSxG_Expected)
+
+data_porteria_players_select$Launched_compose_index <- data_porteria_players_select$Cmp_percent_Launched * log(1 + data_porteria_players_select$Att_Launched)
+
+data_porteria_players_select$Save_penalty_compose_index <- data_porteria_players_select$Save_percent_Penalty * log(1 + data_porteria_players_select$PKatt_Penalty)
+
+data_porteria_players_select <- data_porteria_players_select[, !(names(data_porteria_players_select) %in% c("Stp_percent_Crosses", "Opp_Crosses", "Save_percent", "SoTA", "PSxG+_per__minus__Expected", "PSxG_Expected", "Cmp_percent_Launched", "Att_Launched", "Save_percent_Penalty", "PKatt_Penalty"))]
+
+names(data_porteria_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_porteria_players_select))] <- paste(names(data_porteria_players_select)[(length(vars_identificadoras_players)+1):length(colnames(data_porteria_players_select))], "_Porteria", sep = "")
+
+```
+
+## Unión + Imputación datos "Players"
+
+**Jugadores de campo**
+```{r}
+# Supongamos que tus dataframes se llaman df1, df2, ..., df8
+list_of_dfs_players_noGK <- list(data_playing_time_players_select,
+                                 data_misc_players_select,
+                                 data_tiros_players_select,
+                                 data_gca_players_select,
+                                 data_pases_players_select,
+                                 data_tipopases_players_select,
+                                 data_posesion_players_select,
+                                 data_defense_players_select)
+
+# Usar Reduce con merge para combinar todos los dataframes en la lista
+# Asegúrate de especificar all = TRUE si quieres un outer join (todos los registros de todos los dataframes)
+Players_noGK_merge <- Reduce(function(x, y) merge(x, y, by = vars_identificadoras_players, all = TRUE), list_of_dfs_players_noGK)
+
+
+Players_noGK_merge <- subset(Players_noGK_merge, Players_noGK_merge$Pos!="GK" & Players_noGK_merge$Min_Playing.Time_Generales > 449)
+
+Players_noGK_merge$Url <- NULL
+
+# Tratamos los NA's de Nation
+Players_noGK_merge$Nation[Players_noGK_merge$Player == "Hugo Guillamón" & is.na(Players_noGK_merge$Nation)] <- "ESP"
+Players_noGK_merge$Nation[Players_noGK_merge$Player == "Mamadou N'Diaye" & is.na(Players_noGK_merge$Nation)] <- "SEN"
+
+
+
+# Contar los NA en cada columna del dataframe df
+na_count_per_column <- colSums(is.na(Players_noGK_merge))
+# na_count_per_column
+
+# Encontrar filas con al menos un NA
+rows_with_na <- rowSums(is.na(Players_noGK_merge)) > 0
+# which(rows_with_na) # Son muchas filas que presentan pocos NA's, lo mejor es imputarlas
+
+Players_noGK_merge <- Players_noGK_merge %>%
+  mutate(
+    Pos_2 = sapply(strsplit(Pos, split = ","), function(x) ifelse(length(x) > 1, x[2], "No Pos_2")),
+    Pos = sapply(strsplit(Pos, split = ","), function(x) x[1])
+    )
+
+
+#Guardamos los nombres reales del dataframe
+real_colnames_Players_noGK_merge <- colnames(Players_noGK_merge)
+
+# Normalizar nombres de variables
+names(Players_noGK_merge) <- gsub("[ .:]", "_", names(Players_noGK_merge))
+# Asegúrate de que los nombres son únicos después de la limpieza
+names(Players_noGK_merge) <- make.names(names(Players_noGK_merge), unique = TRUE)
+# Asegurarte que los nombres están actualizados
+Players_noGK_merge <- Players_noGK_merge[, make.names(names(Players_noGK_merge), unique = TRUE)]
+
+numeric_data_names_players_noGK <- colnames(Players_noGK_merge[,sapply(Players_noGK_merge, is.numeric)])
+
+# Uso de kNN imputation desde VIM
+Players_noGK_merge[, numeric_data_names_players_noGK] <- VIM::kNN(Players_noGK_merge[, numeric_data_names_players_noGK])
+
+colnames(Players_noGK_merge) <- real_colnames_Players_noGK_merge
+
+sum(is.na(Players_noGK_merge)) # Ha de ser 0
+```
+
+**Porteros**
+```{r}
+list_of_dfs_players_GK <- list(data_playing_time_players_select,
+                               data_porteria_players_select)
+
+# Usar Reduce con merge para combinar todos los dataframes en la lista
+# Asegúrate de especificar all = TRUE si quieres un outer join (todos los registros de todos los dataframes)
+Players_GK_merge <- Reduce(function(x, y) merge(x, y, by = vars_identificadoras_players, all = TRUE), list_of_dfs_players_GK)
+Players_GK_merge$Url <- NULL
+Players_GK_merge <- subset(Players_GK_merge, Players_GK_merge$Pos=="GK" & Players_GK_merge$Min_Playing.Time_Generales > 449)
+
+# Contar los NA en cada columna del dataframe df
+na_count_per_column <- colSums(is.na(Players_GK_merge))
+na_count_per_column # Solo hay NA's en una columna, en 62 casos, el % respecto a los casos a estudiar es de apenas un 7%, se puede imputar
+
+
+#Guardamos los nombres reales del dataframe
+real_colnames_Players_GK_merge <- colnames(Players_GK_merge)
+
+# Normalizar nombres de variables
+names(Players_GK_merge) <- gsub("[ .:]", "_", names(Players_GK_merge))
+# Asegúrate de que los nombres son únicos después de la limpieza
+names(Players_GK_merge) <- make.names(names(Players_GK_merge), unique = TRUE)
+# Asegurarte que los nombres están actualizados
+Players_GK_merge <- Players_GK_merge[, make.names(names(Players_GK_merge), unique = TRUE)]
+
+numeric_data_names_players_noGK <- colnames(Players_GK_merge[,sapply(Players_GK_merge, is.numeric)])
+
+# Uso de kNN imputation desde VIM
+Players_GK_merge[, numeric_data_names_players_noGK] <- VIM::kNN(Players_GK_merge[, numeric_data_names_players_noGK])
+
+colnames(Players_GK_merge) <- real_colnames_Players_GK_merge
+
+sum(is.na(Players_GK_merge)) # Ha de ser 0
+```
+
+
+
+<br>
+
+# Teams
+
+```{r}
+vars_identificadoras_teams <- c("Season_End_Year", "Squad", "Comp")
+```
+
+## Generales
+```{r}
+# Tiempo de Juego
+data_playing_time_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_playing_time.csv",
+                                    col_types = cols(Season_End_Year = col_character()))
+data_playing_time_teams <- subset(data_playing_time_teams, data_playing_time_teams$Team_or_Opponent == "team")
+data_playing_time_teams$Team_or_Opponent <- NULL
+
+
+vars_playing_time_teams <- c("Age",
+                             "Num_Players",
+                             "Mn_per_Start_Starts",
+                             "Mn_per_Sub_Subs",
+                             "unSub_Subs",
+                             "PPM_Team.Success")
+
+data_playing_time_teams_select <- data_playing_time_teams[,c(vars_identificadoras_teams, vars_playing_time_teams)]
+
+names(data_playing_time_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_playing_time_teams_select))] <- paste(names(data_playing_time_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_playing_time_teams_select))], "_Generales", sep = "")
+
+###################################################################################################################################################
+###################################################################################################################################################
+
+# MISC
+data_misc_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_misc.csv")
+data_misc_teams <- subset(data_misc_teams, data_misc_teams$Team_or_Opponent == "team")
+data_misc_teams$Team_or_Opponent <- NULL
+
+vars_misc_teams <- c("Fld",
+                     "Fls",
+                     "CrdY", # Eliminar
+                     "2CrdY", # Eliminar
+                     "CrdR", # Eliminar
+                     "Won_Aerial", # Eliminar
+                     "Lost_Aerial") # Eliminar
+
+data_misc_teams_select <- data_misc_teams[,c(vars_identificadoras_teams, vars_misc_teams)]
+
+data_misc_teams_select <- data_misc_teams_select %>%
+  mutate(CrdY = if_else(is.na(CrdY), 0, CrdY)) %>%
+  mutate(`2CrdY` = if_else(is.na(`2CrdY`), 0, `2CrdY`)) %>%
+  mutate(CrdR = if_else(is.na(CrdR), 0, CrdR)) %>%
+  mutate(Won_Aerial = if_else(is.na(Won_Aerial), 0, Won_Aerial)) %>%
+  mutate(Lost_Aerial = if_else(is.na(Lost_Aerial), 0, Lost_Aerial)) 
+
+
+data_misc_teams_select$indiscipline_index <- data_misc_teams_select$CrdY + 3 * data_misc_teams_select$`2CrdY` + 4 * data_misc_teams_select$CrdR
+
+data_misc_teams_select$num_Aerial <- data_misc_teams_select$Won_Aerial + data_misc_teams_select$Lost_Aerial
+
+data_misc_teams_select <- data_misc_teams_select[, !(names(data_misc_teams_select) %in% c("CrdY", "2CrdY",  "CrdR",  "Won_Aerial",  "Lost_Aerial"))]
+
+names(data_misc_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_misc_teams_select))] <- paste(names(data_misc_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_misc_teams_select))], "_Generales", sep = "")
+```
+
+## Ataque
+```{r}
+# Tiros
+data_tiros_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_shooting.csv")
+data_tiros_teams <- subset(data_tiros_teams, data_tiros_teams$Team_or_Opponent == "team")
+data_tiros_teams$Team_or_Opponent <- NULL
+
+vars_tiros_teams <- c("Gls_Standard",
+                      "G_minus_xG_Expected",
+                      "Sh_per_90_Standard",
+                      "SoT_Standard", # Eliminar
+                      "Sh_Standard", # Eliminar
+                      "xG_Expected") # Eliminar
+
+data_tiros_teams_select <- data_tiros_teams[,c(vars_identificadoras_teams, vars_tiros_teams)]
+
+data_tiros_teams_select$Acc_shot <- ifelse(data_tiros_teams_select$Sh_Standard == 0, 
+                                           0, 
+                                           data_tiros_teams_select$SoT_Standard / data_tiros_teams_select$Sh_Standard)
+
+data_tiros_teams_select$xG_per_SoT_Expected <- ifelse(data_tiros_teams_select$SoT_Standard == 0, 
+                                           0, 
+                                           data_tiros_teams_select$xG_Expected / data_tiros_teams_select$SoT_Standard)
+
+data_tiros_teams_select <- data_tiros_teams_select[, !(names(data_tiros_teams_select) %in% c("SoT_Standard", "Sh_Standard", "xG_Expected"))]
+
+names(data_tiros_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_tiros_teams_select))] <- paste(names(data_tiros_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_tiros_teams_select))], "_Ataque", sep = "")
+
+###################################################################################################################################################
+###################################################################################################################################################
+
+# Creación de Oportunidades
+data_gca_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_gca.csv")
+data_gca_teams <- subset(data_gca_teams, data_gca_teams$Team_or_Opponent == "team")
+data_gca_teams$Team_or_Opponent <- NULL
+
+vars_gca_teams <- c("SCA90_SCA",
+                    "GCA90_GCA", # Eliminar
+                    "PassLive_GCA",
+                    "PassDead_GCA",
+                    "Sh_SCA", # Eliminar
+                    "SCA_SCA", # Eliminar
+                    "Fld_SCA", # Eliminar
+                    "Def_SCA") # Eliminar
+
+data_gca_teams_select <- data_gca_teams[,c(vars_identificadoras_teams, vars_gca_teams)]
+
+data_gca_teams_select$GCA90_SCA <- ifelse(data_gca_teams_select$SCA90_SCA == 0, 
+                                           0, 
+                                           data_gca_teams_select$GCA90_GCA / data_gca_teams_select$SCA90_SCA)
+
+data_gca_teams_select$Sh_SCA_percent <- ifelse(data_gca_teams_select$SCA_SCA == 0, 
+                                           0, 
+                                           data_gca_teams_select$Sh_SCA / data_gca_teams_select$SCA_SCA)
+
+data_gca_teams_select$Fld_SCA_percent <- ifelse(data_gca_teams_select$SCA_SCA == 0, 
+                                           0, 
+                                           data_gca_teams_select$Fld_SCA / data_gca_teams_select$SCA_SCA)
+
+data_gca_teams_select$Def_SCA_percent <- ifelse(data_gca_teams_select$SCA_SCA == 0, 
+                                           0, 
+                                           data_gca_teams_select$Def_SCA / data_gca_teams_select$SCA_SCA)
+
+data_gca_teams_select <- data_gca_teams_select[, !(names(data_gca_teams_select) %in% c("GCA90_GCA", "Sh_SCA", "SCA_SCA", "Fld_SCA", "Def_SCA"))]
+
+names(data_gca_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_gca_teams_select))] <- paste(names(data_gca_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_gca_teams_select))], "_Ataque", sep = "")
+
+```
+
+## Transiciones
+```{r}
+# Pases
+data_pases_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_passing.csv")
+data_pases_teams <- subset(data_pases_teams, data_pases_teams$Team_or_Opponent == "team")
+data_pases_teams$Team_or_Opponent <- NULL
+
+vars_pases_teams <- c("Cmp_Total",
+                    "Att_Short", # Eliminar
+                    "Att_Total", # Eliminar
+                    "Att_Medium", # Eliminar
+                    "Att_Long", # Eliminar
+                    "Final_Third") # Eliminar
+
+data_pases_teams_select <- data_pases_teams[,c(vars_identificadoras_teams, vars_pases_teams)]
+
+data_pases_teams_select$Att_Short_percent <- ifelse(data_pases_teams_select$Att_Total == 0, 
+                                           0, 
+                                           data_pases_teams_select$Att_Short / data_pases_teams_select$Att_Total)
+
+data_pases_teams_select$Att_Medium_percent <- ifelse(data_pases_teams_select$Att_Total == 0, 
+                                           0, 
+                                           data_pases_teams_select$Att_Medium / data_pases_teams_select$Att_Total)
+
+data_pases_teams_select$Att_Long_percent <- ifelse(data_pases_teams_select$Att_Total == 0, 
+                                           0, 
+                                           data_pases_teams_select$Att_Long / data_pases_teams_select$Att_Total)
+
+data_pases_teams_select$Final_Third_percent <- ifelse(data_pases_teams_select$Cmp_Total == 0, 
+                                           0, 
+                                           data_pases_teams_select$Final_Third / data_pases_teams_select$Cmp_Total)
+
+data_pases_teams_select <- data_pases_teams_select[, !(names(data_pases_teams_select) %in% c("Att_Short", "Att_Total", "Att_Medium", "Att_Long", "Final_Third"))]
+
+names(data_pases_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_pases_teams_select))] <- paste(names(data_pases_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_pases_teams_select))], "_Transiciones", sep = "")
+
+###################################################################################################################################################
+###################################################################################################################################################
+
+
+# Tipos de pases
+data_tipopases_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_passing_types.csv")
+data_tipopases_teams <- subset(data_tipopases_teams, data_tipopases_teams$Team_or_Opponent == "team")
+data_tipopases_teams$Team_or_Opponent <- NULL
+
+vars_tipopases_teams <- c("TB_Pass",
+                          "Crs_Pass",
+                          "Sw_Pass",
+                          "In_Corner", # Eliminar
+                          "CK_Pass",  # Eliminar
+                          "Out_Corner",  # Eliminar
+                          "Str_Corner")  # Eliminar
+
+data_tipopases_teams_select <- data_tipopases_teams[,c(vars_identificadoras_teams, vars_tipopases_teams)]
+
+data_tipopases_teams_select$In_Corner_percent <- ifelse(data_tipopases_teams_select$CK_Pass == 0, 
+                                           0, 
+                                           data_tipopases_teams_select$In_Corner / data_tipopases_teams_select$CK_Pass)
+
+data_tipopases_teams_select$Out_Corner_percent <- ifelse(data_tipopases_teams_select$CK_Pass == 0, 
+                                           0, 
+                                           data_tipopases_teams_select$Out_Corner / data_tipopases_teams_select$CK_Pass)
+
+data_tipopases_teams_select$Str_Corner_percent <- ifelse(data_tipopases_teams_select$CK_Pass == 0, 
+                                           0, 
+                                           data_tipopases_teams_select$Str_Corner / data_tipopases_teams_select$CK_Pass)
+
+data_tipopases_teams_select <- data_tipopases_teams_select[, !(names(data_tipopases_teams_select) %in% c("In_Corner", "CK_Pass", "Out_Corner", "Str_Corner"))]
+
+names(data_tipopases_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_tipopases_teams_select))] <- paste(names(data_tipopases_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_tipopases_teams_select))], "_Transiciones", sep = "")
+
+###################################################################################################################################################
+###################################################################################################################################################
+
+
+# Posesion
+data_posesion_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_possession.csv")
+data_posesion_teams <- subset(data_posesion_teams, data_posesion_teams$Team_or_Opponent == "team")
+data_posesion_teams$Team_or_Opponent <- NULL
+
+vars_posesion_teams <- c("PrgDist_Carries",
+                         "Att_Take",
+                         "Touches_Touches", # Eliminar
+                         "Def Pen_Touches",# Eliminar
+                         "Def 3rd_Touches",# Eliminar
+                         "Mid 3rd_Touches",# Eliminar
+                         "Att 3rd_Touches",# Eliminar
+                         "Att Pen_Touches")# Eliminar
+
+data_posesion_teams_select <- data_posesion_teams[,c(vars_identificadoras_teams, vars_posesion_teams)]
+
+data_posesion_teams_select$DefPen_Touches_percent <- ifelse(data_posesion_teams_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_teams_select$`Def Pen_Touches` / data_posesion_teams_select$Touches_Touches)
+
+data_posesion_teams_select$Def3rd_Touches_percent <- ifelse(data_posesion_teams_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_teams_select$`Def 3rd_Touches` / data_posesion_teams_select$Touches_Touches)
+
+data_posesion_teams_select$Mid3rd_Touches_percent <- ifelse(data_posesion_teams_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_teams_select$`Mid 3rd_Touches` / data_posesion_teams_select$Touches_Touches)
+
+data_posesion_teams_select$Att3rd_Touches_percent <- ifelse(data_posesion_teams_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_teams_select$`Att 3rd_Touches` / data_posesion_teams_select$Touches_Touches)
+
+data_posesion_teams_select$AttPen_Touches_percent <- ifelse(data_posesion_teams_select$Touches_Touches == 0, 
+                                           0, 
+                                           data_posesion_teams_select$`Att Pen_Touches` / data_posesion_teams_select$Touches_Touches)
+
+data_posesion_teams_select <- data_posesion_teams_select[, !(names(data_posesion_teams_select) %in% c("Touches_Touches", "Def Pen_Touches", "Def 3rd_Touches", "Mid 3rd_Touches", "Att 3rd_Touches", "Att Pen_Touches"))]
+
+names(data_posesion_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_posesion_teams_select))] <- paste(names(data_posesion_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_posesion_teams_select))], "_Transiciones", sep = "")
+```
+
+## Defensa
+```{r}
+# Acciones Defensivas
+
+data_defense_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_defense.csv")
+data_defense_teams <- subset(data_defense_teams, data_defense_teams$Team_or_Opponent == "team")
+data_defense_teams$Team_or_Opponent <- NULL
+
+vars_defense_teams <- c("Tkl_Tackles",
+                        "Int",
+                        "Att_Challenges",
+                        "Blocks_Blocks",
+                        "Tkl_Tackles", # Eliminar
+                        "Def 3rd_Tackles", # Eliminar
+                        "Mid 3rd_Tackles", # Eliminar
+                        "Att 3rd_Tackles") # Eliminar
+
+data_defense_teams_select <- data_defense_teams[,c(vars_identificadoras_teams, vars_defense_teams)]
+
+data_defense_teams_select$Def3rd_Tackles_percent <- ifelse(data_defense_teams_select$Tkl_Tackles == 0, 
+                                           0, 
+                                           data_defense_teams_select$`Def 3rd_Tackles` / data_defense_teams_select$Tkl_Tackles)
+
+data_defense_teams_select$Mid3rd_Tackles_percent <- ifelse(data_defense_teams_select$Tkl_Tackles == 0, 
+                                           0, 
+                                           data_defense_teams_select$`Mid 3rd_Tackles` / data_defense_teams_select$Tkl_Tackles)
+
+data_defense_teams_select$Att3rd_Tackles_percent <- ifelse(data_defense_teams_select$Tkl_Tackles == 0, 
+                                           0, 
+                                           data_defense_teams_select$`Att 3rd_Tackles` / data_defense_teams_select$Tkl_Tackles)
+
+data_defense_teams_select <- data_defense_teams_select[, !(names(data_defense_teams_select) %in% c("Def 3rd_Tackles",  "Mid 3rd_Tackles",  "Att 3rd_Tackles"))]
+
+names(data_defense_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_defense_teams_select))] <- paste(names(data_defense_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_defense_teams_select))], "_Defensa", sep = "")
+
+```
+
+## Porteria
+```{r}
+data_porteria_basica_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_keepers.csv")
+data_porteria_basica_teams <- subset(data_porteria_basica_teams, data_porteria_basica_teams$Team_or_Opponent == "team")
+data_porteria_basica_teams$Team_or_Opponent <- NULL
+
+data_porteria_avanzada_teams <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Teams/big5_team_keepers_adv.csv")
+data_porteria_avanzada_teams <- subset(data_porteria_avanzada_teams, data_porteria_avanzada_teams$Team_or_Opponent == "team")
+data_porteria_avanzada_teams$Team_or_Opponent <- NULL
+
+# Nombres de columnas para la unión
+colnames_4_union_teams <- colnames(data_porteria_basica_teams)[1:3]
+
+# Eliminar columnas duplicadas que no son parte de la unión
+for (col_name in setdiff(names(data_porteria_basica_teams), colnames_4_union_teams)) {
+  if (col_name %in% names(data_porteria_avanzada_teams) && all(data_porteria_basica_teams[[col_name]] == data_porteria_avanzada_teams[[col_name]], na.rm = TRUE)) {
+    data_porteria_basica_teams[[col_name]] <- NULL  # Elimina la columna si los valores son iguales
+  }
+}
+
+# Realizar la fusión
+data_porteria_teams <- merge(data_porteria_basica_teams, data_porteria_avanzada_teams, by = colnames_4_union_teams)
+data_porteria_teams$GA_Goals <- NULL
+
+vars_porteria_teams <- c("Num_Players",
+                         "GA90",
+                         "PSxG_per_SoT_Expected",
+                         "CS_percent",
+                         "Att_Launched",
+                         "Opp_Crosses",
+                         "AvgLen_Goal",
+                         "AvgLen_Passes",
+                         "CK_Goals")
+
+data_porteria_teams_select <- data_porteria_teams[,c(vars_identificadoras_teams, vars_porteria_teams)]
+
+names(data_porteria_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_porteria_teams_select))] <- paste(names(data_porteria_teams_select)[(length(vars_identificadoras_teams)+1):length(colnames(data_porteria_teams_select))], "_Porteria", sep = "")
+
+```
+
+## Unión + Imputación datos "Teams"
+
+```{r}
+# Supongamos que tus dataframes se llaman df1, df2, ..., df8
+list_of_dfs_teams <- list(data_playing_time_teams_select,
+                          data_misc_teams_select,
+                          data_tiros_teams_select,
+                          data_gca_teams_select,
+                          data_pases_teams_select,
+                          data_tipopases_teams_select,
+                          data_posesion_teams_select,
+                          data_defense_teams_select,
+                          data_porteria_teams_select)
+
+# Usar Reduce con merge para combinar todos los dataframes en la lista
+# Asegúrate de especificar all = TRUE si quieres un outer join (todos los registros de todos los dataframes)
+teams_merge <- Reduce(function(x, y) merge(x, y, by = vars_identificadoras_teams, all = TRUE), list_of_dfs_teams)
+teams_merge$Url <- NULL
+
+# Tratamos los NA's de Nation
+sum(is.na(teams_merge))
+
+# Contar los NA en cada columna del dataframe df
+na_count_per_column <- colSums(is.na(teams_merge))
+na_count_per_column
+
+# Encontrar filas con al menos un NA
+rows_with_na <- rowSums(is.na(teams_merge)) > 0
+# which(rows_with_na) # Son muchas filas que presentan pocos NA's, lo mejor es imputarlas
+
+
+#Guardamos los nombres reales del dataframe
+real_colnames_teams_merge <- colnames(teams_merge)
+
+# Normalizar nombres de variables
+names(teams_merge) <- gsub("[ .:]", "_", names(teams_merge))
+# Asegúrate de que los nombres son únicos después de la limpieza
+names(teams_merge) <- make.names(names(teams_merge), unique = TRUE)
+# Asegurarte que los nombres están actualizados
+teams_merge <- teams_merge[, make.names(names(teams_merge), unique = TRUE)]
+
+numeric_data_names_teams <- colnames(teams_merge[,sapply(teams_merge, is.numeric)])
+
+# Uso de kNN imputation desde VIM
+teams_merge[, numeric_data_names_teams] <- VIM::kNN(teams_merge[, numeric_data_names_teams])
+
+colnames(teams_merge) <- real_colnames_teams_merge
+
+sum(is.na(teams_merge)) # Ha de ser 0
+```
+
+# Exportacion de datos
+Exporto las tablas al directorio donde se guardaran en formato csv
+```{r}
+dir_data_def = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data"
+write.csv(teams_merge, paste0(dir_data_def, "/Teams_data.csv"), row.names = FALSE)
+write.csv(Players_noGK_merge, paste0(dir_data_def, "/Players_noGK_data.csv"), row.names = FALSE)
+write.csv(Players_GK_merge, paste0(dir_data_def, "/Players_GK_data.csv"), row.names = FALSE)
+```
+
+
+
+
+

@@ -1,0 +1,375 @@
+---
+title: "EDA datos definitivos"
+author: "Ricard Sierra"
+date: '2024-05-07'
+output: html_document
+---
+
+```{r}
+if (!require("readr")) install.packages("readr", dependencies = TRUE)
+if (!require("tidyr")) install.packages("tidyr", dependencies = TRUE)
+if (!require("gridExtra")) install.packages("gridExtra", dependencies = TRUE)
+if (!require("grid")) install.packages("grid", dependencies = TRUE)
+if (!require("corrplot")) install.packages("corrplot", dependencies = TRUE)
+if (!require("ggplot2")) install.packages("ggplot2", dependencies = TRUE)
+if (!require("GGally")) install.packages("GGally", dependencies = TRUE)
+if (!require("factoextra")) install.packages("factoextra", dependencies = TRUE)
+if (!require("dplyr")) install.packages("dplyr", dependencies = TRUE)
+if (!require("ggrepel", quietly = TRUE)) install.packages("ggrepel", dependencies = TRUE)
+
+library(readr)
+library(tidyr)
+library(gridExtra)
+library(grid)
+library(corrplot)
+library(ggplot2)
+library(GGally)
+library(factoextra)
+library(dplyr)
+library(ggrepel)
+```
+
+
+```{r}
+descriptive_and_export_data_function <- function(data, file0_path, color_points = "skyblue", color_silhouette = "blue"){
+  
+  # data = Players_noGK_data
+  # file0_path = Carpeta_General_Players_Ataque
+  # color_points = "skyblue"
+  # color_silhouette = "blue"
+  
+  for(var in 1:ncol(data)){
+    
+    # var=2
+    var_name = colnames(data)[var]
+    
+    #Tabla Descriptiva
+    estadisticas_descriptivas <- data %>%
+      summarise(
+        Count = sum(!is.na((data[[var_name]]))),
+        Mean = round(mean(data[[var_name]], na.rm = TRUE), 2),
+        Median = round(median(data[[var_name]], na.rm = TRUE), 2),
+        SD = round(sd(data[[var_name]], na.rm = TRUE), 2),
+        Min = round(min(data[[var_name]], na.rm = TRUE), 2),
+        `1st Qu` = round(quantile(data[[var_name]], 0.25, na.rm = TRUE), 2),
+        `3rd Qu` = round(quantile(data[[var_name]], 0.75, na.rm = TRUE), 2),
+        Max = round(max(data[[var_name]], na.rm = TRUE), 2),
+        `% Missings` = round((sum(is.na(data[[var_name]]))/length(data[[var_name]]))*100,2),
+        Outliers = round(sum(data[[var_name]] < (quantile(data[[var_name]], 0.25, na.rm = TRUE) - 1.5 * IQR(data[[var_name]], na.rm = TRUE)) |
+                     data[[var_name]] > (quantile(data[[var_name]], 0.75, na.rm = TRUE) + 1.5 * IQR(data[[var_name]], na.rm = TRUE)), na.rm = TRUE),2)
+        ) %>%
+      pivot_longer(everything(), names_to = "Statistic", values_to = "Value")
+    
+    rownames(estadisticas_descriptivas) <- NULL
+    
+    estadisticas_descriptivas
+    
+    p <- tableGrob(estadisticas_descriptivas, rows = NULL, 
+                   theme = ttheme_minimal(
+                     base_size = 10, # Ajusta el tamaño de la fuente aquí
+                     core = list(fg_params = list(fontface = 1, fontsize = 10)), # Texto de las celdas
+                     colhead = list(fg_params = list(fontface = 2, fontsize = 11)), # Cabecera con negrita
+                     padding = unit(c(4, 4), "mm") # Ajusta el padding de las celdas
+                     ))
+    
+    # Convierte las dimensiones a milímetros
+    grob_width <- convertUnit(grobWidth(p), "cm", valueOnly = TRUE)
+    grob_height <- convertUnit(grobHeight(p), "cm", valueOnly = TRUE)
+    
+    # Asume que la resolución es de 300 ppi (puntos por pulgada)
+    res <- 1000
+    width_in_inches <- grob_width * 2
+    height_in_inches <- grob_height * 0.7
+
+    
+    file_path <- paste0(file0_path,var_name,"Table.png")
+    # Ajusta el tamaño de la imagen basado en las dimensiones en pulgadas y la resolución
+    png(file_path, width = width_in_inches, height = height_in_inches, res = res, units = "in")
+    grid.draw(p)
+    dev.off()
+    
+    
+    # Grafico
+    
+    data_filtrado <- data %>%
+      filter(!is.na(data[[var_name]]) & data[[var_name]] > 0 & is.finite(data[[var_name]]))
+    
+    # Calculando los límites para los outliers
+    iqr <- IQR(data_filtrado[[var_name]], na.rm = TRUE)
+    lower_bound <- quantile(data_filtrado[[var_name]], 0.25, na.rm = TRUE) - 1.5 * iqr
+    upper_bound <- quantile(data_filtrado[[var_name]], 0.75, na.rm = TRUE) + 1.5 * iqr
+    
+    # Separando los outliers para colorearlos de forma diferente
+    data_filtrado$outlier <- data_filtrado[[var_name]] < lower_bound | data_filtrado[[var_name]] > upper_bound
+    
+    # Calculando el rango de los datos
+    rango_datos <- max(data_filtrado[[var_name]], na.rm = TRUE) - min(data_filtrado[[var_name]], na.rm = TRUE)
+    
+    # Determina el número máximo deseado de marcas en el eje Y
+    max_breaks <- 10
+    
+    # Ajusta el tamaño del paso basado en el rango de datos y el número máximo de marcas
+    tamaño_paso_optimo <- rango_datos / max_breaks
+    
+    # Encuentra el siguiente "bonito" tamaño del paso para evitar números complejos
+    tamaño_paso <- 10^floor(log10(tamaño_paso_optimo)) # Base para el tamaño del paso
+    if (tamaño_paso_optimo / tamaño_paso >= 5) {
+      tamaño_paso <- tamaño_paso * 5
+    } else if (tamaño_paso_optimo / tamaño_paso >= 2) {
+      tamaño_paso <- tamaño_paso * 2
+    }
+    
+    # Asegurándose de que el tamaño del paso no sea 0 en caso de datos muy uniformes
+    tamaño_paso <- ifelse(tamaño_paso == 0, 1, tamaño_paso)
+
+    var_plot <- ggplot(data_filtrado, aes(x = factor(1), y = data_filtrado[[var_name]])) +
+      geom_violin(color = color_silhouette, fill = NA, alpha = 0.7, lwd = 0.5) +
+      geom_jitter(aes(color = outlier), width = 0.25, size = 1, alpha = 0.5, show.legend = FALSE) +
+      geom_boxplot(width = 0.1, fill = NA, color = "black", outlier.shape = NA) +
+      scale_color_manual(values = c("FALSE" = color_points, "TRUE" = "red")) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.y = element_line(color = "grey", size = 0.5),
+        panel.grid.minor.y = element_blank()
+        ) +
+      scale_y_continuous(
+        breaks = seq(floor(min(data_filtrado[[var_name]], na.rm = TRUE)), 
+                     ceiling(max(data_filtrado[[var_name]], na.rm = TRUE)), by = tamaño_paso)
+        ) + 
+      xlab(NULL) + 
+      ylab(NULL)
+    
+    print(var_plot)
+    
+    file_path <- paste0(file0_path,var_name,".png")
+    ggsave(file_path, plot = var_plot, width = 13)
+  }
+}
+```
+
+
+## Carpetas
+```{r}
+Carpeta_General <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/4. EDA/EDA SELECT/"
+Carpeta_General_Players <- paste0(Carpeta_General, "Players/")
+Carpeta_General_Teams <- paste0(Carpeta_General, "Teams/")
+```
+
+```{r}
+Carpeta_General_Players_Ataque <- paste0(Carpeta_General_Players, "Ataque/")
+
+#############################################################################################################################
+#############################################################################################################################
+
+Carpeta_General_Players_Defensa <- paste0(Carpeta_General_Players, "Defensa/")
+
+#############################################################################################################################
+#############################################################################################################################
+
+Carpeta_General_Players_General <- paste0(Carpeta_General_Players, "General/")
+
+#############################################################################################################################
+#############################################################################################################################
+
+Carpeta_General_Players_Porteria <- paste0(Carpeta_General_Players, "Porteria/")
+
+#############################################################################################################################
+#############################################################################################################################
+
+Carpeta_General_Players_Transiciones <- paste0(Carpeta_General_Players, "Transiciones/")
+
+```
+
+```{r}
+Carpeta_General_Teams_Ataque <- paste0(Carpeta_General_Teams, "Ataque/")
+
+#############################################################################################################################
+#############################################################################################################################
+
+Carpeta_General_Teams_Defensa <- paste0(Carpeta_General_Teams, "Defensa/")
+
+#############################################################################################################################
+#############################################################################################################################
+
+Carpeta_General_Teams_General <- paste0(Carpeta_General_Teams, "General/")
+
+#############################################################################################################################
+#############################################################################################################################
+
+Carpeta_General_Teams_Porteria <- paste0(Carpeta_General_Teams, "Porteria/")
+
+#############################################################################################################################
+#############################################################################################################################
+
+Carpeta_General_Teams_Transiciones <- paste0(Carpeta_General_Teams, "Transiciones/")
+
+```
+
+
+
+## Generación de Graficos
+
+### Jugadores de campo
+```{r}
+Players_noGK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Players_noGK_data.csv")
+
+
+```
+
+#### General
+
+```{r}
+columnas_players_generales <- grep("_Generales$", names(Players_noGK_data), value = TRUE)
+Players_noGK_data_generales <- Players_noGK_data[, columnas_players_generales]
+
+
+descriptive_and_export_data_function(data = Players_noGK_data_generales,
+                                     file0_path = Carpeta_General_Players_General, 
+                                     color_points = "skyblue",
+                                     color_silhouette = "blue")
+```
+
+#### Ataque
+
+```{r}
+columnas_players_ataque <- grep("_Ataque$", names(Players_noGK_data), value = TRUE)
+Players_noGK_data_ataque <- Players_noGK_data[, columnas_players_ataque]
+
+
+descriptive_and_export_data_function(data = Players_noGK_data_ataque,
+                                     file0_path = Carpeta_General_Players_Ataque, 
+                                     color_points = "mediumpurple",
+                                     color_silhouette = "purple4")
+```
+
+#### Transiciones
+
+```{r}
+columnas_players_transiciones <- grep("_Transiciones$", names(Players_noGK_data), value = TRUE)
+Players_noGK_data_transiciones <- Players_noGK_data[, columnas_players_transiciones]
+
+
+descriptive_and_export_data_function(data = Players_noGK_data_transiciones,
+                                     file0_path = Carpeta_General_Players_Transiciones, 
+                                     color_points = "palegreen",
+                                     color_silhouette = "green4")
+```
+
+#### Defensa
+
+```{r}
+columnas_players_defensa <- grep("_Defensa$", names(Players_noGK_data), value = TRUE)
+Players_noGK_data_defensa <- Players_noGK_data[, columnas_players_defensa]
+
+
+descriptive_and_export_data_function(data = Players_noGK_data_defensa,
+                                     file0_path = Carpeta_General_Players_Defensa, 
+                                     color_points = "tan1",
+                                     color_silhouette = "wheat2")
+```
+
+
+
+### Porteros
+```{r}
+Players_GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Players_GK_data.csv")
+```
+
+```{r}
+columnas_players_generales <- grep("_Generales$", names(Players_GK_data), value = TRUE)
+Players_GK_data_generales <- Players_GK_data[, columnas_players_generales]
+
+
+descriptive_and_export_data_function(data = Players_GK_data_generales,
+                                     file0_path = paste0(Carpeta_General_Players_General, "GK/"), 
+                                     color_points = "skyblue",
+                                     color_silhouette = "blue")
+```
+
+```{r}
+columnas_players_porteria <- grep("_Porteria$", names(Players_GK_data), value = TRUE)
+Players_GK_data_porteria <- Players_GK_data[, columnas_players_porteria]
+
+
+descriptive_and_export_data_function(data = Players_GK_data_porteria,
+                                     file0_path = Carpeta_General_Players_Porteria, 
+                                     color_points = "lightpink1",
+                                     color_silhouette = "deeppink2")
+```
+
+
+### Equipos
+```{r}
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Teams_data.csv")
+```
+
+#### General
+
+```{r}
+columnas_teams_generales <- grep("_Generales$", names(Teams_data), value = TRUE)
+Teams_data_generales <- Teams_data[, columnas_teams_generales]
+
+
+descriptive_and_export_data_function(data = Teams_data_generales,
+                                     file0_path = Carpeta_General_Teams_General, 
+                                     color_points = "skyblue",
+                                     color_silhouette = "blue")
+```
+
+#### Ataque
+
+```{r}
+columnas_teams_ataque <- grep("_Ataque$", names(Teams_data), value = TRUE)
+Teams_data_ataque <- Teams_data[, columnas_teams_ataque]
+
+
+descriptive_and_export_data_function(data = Teams_data_ataque,
+                                     file0_path = Carpeta_General_Teams_Ataque, 
+                                     color_points = "mediumpurple",
+                                     color_silhouette = "purple4")
+```
+
+#### Transiciones
+
+```{r}
+columnas_teams_transiciones <- grep("_Transiciones$", names(Teams_data), value = TRUE)
+Teams_data_transiciones <- Teams_data[, columnas_teams_transiciones]
+
+
+descriptive_and_export_data_function(data = Teams_data_transiciones,
+                                     file0_path = Carpeta_General_Teams_Transiciones, 
+                                     color_points = "palegreen",
+                                     color_silhouette = "green4")
+```
+
+#### Defensa
+
+```{r}
+columnas_teams_defensa <- grep("_Defensa$", names(Teams_data), value = TRUE)
+Teams_data_defensa <- Teams_data[, columnas_teams_defensa]
+
+
+descriptive_and_export_data_function(data = Teams_data_defensa,
+                                     file0_path = Carpeta_General_Teams_Defensa, 
+                                     color_points = "tan1",
+                                     color_silhouette = "wheat2")
+```
+
+#### Porteria
+
+```{r}
+columnas_teams_porteria <- grep("_Porteria$", names(Teams_data), value = TRUE)
+Teams_data_porteria <- Teams_data[, columnas_teams_porteria]
+
+
+descriptive_and_export_data_function(data = Teams_data_porteria,
+                                     file0_path = Carpeta_General_Teams_Porteria, 
+                                     color_points = "lightpink1",
+                                     color_silhouette = "deeppink2")
+
+```
+
+
+
