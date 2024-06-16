@@ -1,0 +1,754 @@
+---
+title: "Algoritmo de Predicción de rendimiento"
+author: "Ricard Sierra"
+date: '2024-05-26'
+output: html_document
+---
+
+**Paqueteria**
+```{r}
+library(readr)
+library(dplyr)
+library(fastDummies)
+library(lme4)
+library(fmsb)
+library(openxlsx)
+```
+
+
+**BBDD**
+```{r}
+## Jugadores de campo
+Players_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_noGK_data_clustered.csv", 
+    col_types = cols(Cluster = col_character()))
+
+Players_cols_to_rename <- names(Players_data)[5:length(names(Players_data))]
+Players_data <- Players_data %>%
+  rename_with(~paste0(., "_Players"), all_of(Players_cols_to_rename))
+
+## Porteros
+GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_GK_data_clustered.csv", 
+    col_types = cols(Cluster = col_character()))[,-6]
+
+GK_cols_to_rename <- names(GK_data)[5:22]
+GK_data <- GK_data %>%
+  rename_with(~paste0(., "_GK"), all_of(GK_cols_to_rename))
+
+# subset(GK_data, GK_data$Nation_GK=="ENG")
+
+## Equipos
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Teams_data_clustered.csv", 
+    col_types = cols(Cluster = col_character()))
+
+Teams_cols_to_rename <- names(Teams_data)[4:61]
+Teams_data <- Teams_data %>%
+  rename_with(~paste0(., "_Teams"), all_of(Teams_cols_to_rename))
+
+subset(Teams_data, Teams_data$Comp=="Premier League" )
+
+
+```
+
+
+**Funciones Internas**
+```{r}
+# Función para calcular predicciones usando simulate
+simulate_predict <- function(model, newdata) {
+  fixed_effects <- fixef(model)
+  random_effects <- ranef(model)
+  pred_fixed <- model.matrix(model$terms, newdata) %*% fixed_effects
+  
+  newdata$Player <- as.factor(newdata$Player) # Ensure the grouping variable is a factor
+  groups <- unique(newdata$Player)
+  pred_random <- numeric(nrow(newdata))
+  
+  for (group in groups) {
+    group_idx <- which(newdata$Player == group)
+    if (group %in% names(random_effects[[1]])) {
+      pred_random[group_idx] <- random_effects[[1]][group, "(Intercept)"]
+    } else {
+      pred_random[group_idx] <- 0
+    }
+  }
+  
+  predictions <- pred_fixed + pred_random
+  return(predictions)
+}
+
+########################################################################################################################
+########################################################################################################################
+
+# Hay variables que no tienen sentido que sean negativas, esta funcion las convierte en 0 en caso de que lo sean
+replace_negatives_with_zero <- function(df) {
+  # Definir los nombres de las variables sin el sufijo "_Player" que no deberían ser negativas
+  variables_no_negative <- c(
+    "Min_Playing.Time_Generales", "Min_percent_Playing.Time_Generales", 
+    "Compl_Starts_Generales", "MP_Playing.Time_Generales", 
+    "Recov_Generales", "Fls_Generales", "indiscipline_index_Generales", 
+    "Crs_Generales", "Aerial_compose_Index_Generales", "Gls_Standard_Ataque", 
+    "Sh_Standard_Ataque", "SoT_percent_Standard_Ataque", "Sh_per_90_Standard_Ataque", 
+    "FK_Standard_Ataque", "SCA_SCA_Ataque", "Eff_SCA_GCA_Ataque", 
+    "TO_SCA_Ataque", "Sh_SCA_Ataque", "Eff_Sh_SCA_GCA_Ataque", 
+    "Fld_SCA_Ataque", "Eff_Fld_SCA_GCA_Ataque", "PassDead_SCA_Ataque", 
+    "Def_SCA_Ataque", "Att_Total_Transiciones", "Cmp_percent_Total_Transiciones", 
+    "Cmp_percent_Short_Transiciones", "Cmp_percent_Medium_Transiciones", 
+    "Cmp_percent_Long_Transiciones", "PrgP_Transiciones", "MeanDist_Total_Transiciones", 
+    "Live_Pass_Transiciones", "Off_Outcomes_Transiciones", "Blocks_Outcomes_Transiciones", 
+    "CK_Pass_Transiciones", "Sw_Pass_Transiciones", "Final_Third_Carries_Transiciones", 
+    "PrgC_Carries_Transiciones", "TotDist_Carries_Transiciones", "Att_Take_Transiciones", 
+    "Succ_percent_Take_Transiciones", "Frac_DefPen_Touches_Transiciones", 
+    "Frac_Def3rd_Touches_Transiciones", "Frac_Mid3rd_Touches_Transiciones", 
+    "Frac_Att3rd_Touches_Transiciones", "Frac_AttPen_Touches_Transiciones", 
+    "Tkl.Int_Defensa", "Att_Challenges_Defensa", "Blocks_Blocks_Defensa", 
+    "Frac_Def3rd_Tackles_Defensa", "Frac_Mid3rd_Tackles_Defensa", 
+    "Frac_Att3rd_Tackles_Defensa", "Mins_Per_90", "Stp_crosses_compose_index", 
+    "Save_compose_index", "Att (GK)_Passes", "Launched_compose_index", 
+    "OPA_per_90_Sweeper", "Save_penalty_compose_index"
+  )
+  
+  # Iterar sobre las variables y reemplazar los valores negativos por 0
+  for (variable in variables_no_negative) {
+    matching_columns <- grep(variable, names(df), value = TRUE)
+    for (col in matching_columns) {
+      df[[col]][df[[col]] < 0] <- 0
+    }
+  }
+  
+  return(df)
+}
+
+# Función para calcular el área de un polígono a partir de sus vértices
+calcular_area_poligono <- function(x, y) {
+  n <- length(x)
+  area <- 0
+  j <- n # Inicializando j al último vértice del polígono
+  for (i in 1:n) {
+    area <- area + (x[j] + x[i]) * (y[j] - y[i])
+    j <- i  # j es previo a i
+  }
+  return(abs(area / 2))
+}
+
+########################################################################################################################
+########################################################################################################################
+
+# Función para calcular el área del polígono
+calcular_area_poligono <- function(x, y) {
+  n <- length(x)
+  area <- 0
+  j <- n # Inicializando j al último vértice del polígono
+  for (i in 1:n) {
+    area <- area + (x[j] + x[i]) * (y[j] - y[i])
+    j <- i  # j es previo a i
+  }
+  return(abs(area / 2))
+}
+
+########################################################################################################################
+########################################################################################################################
+
+# Función para transformar a percentiles
+transformar_a_percentil <- function(df) {
+
+  df_percentil <- df
+  
+  # Aplicar la transformación a cada columna numérica
+  num_cols <- sapply(df, is.numeric)
+  
+  for (col in names(df)[num_cols]) {
+    # col = names(df)[14]
+    # Calcular la función de distribución acumulativa empírica (ECDF)
+    ecdf_col <- ecdf(df[[col]])
+    # Transformar los valores de la columna a percentiles
+    df_percentil[[col]] <- sapply(df[[col]], ecdf_col)
+  }
+  
+  return(df_percentil)
+}
+
+########################################################################################################################
+########################################################################################################################
+
+# dataset = player_data[col_4_print_in_prediction]
+# predicted_data = predicted_data
+# output_dir = real_output_dir
+# name_folder = folder
+
+generate_radar_charts <- function(dataset, 
+                                  predicted_data, 
+                                  output_dir,
+                                  name_folder) {
+  
+  # Definir los sufijos y los grupos de variables
+  sufijos <- c("Generales", "Ataque", "Defensa", "Transiciones", "Porteria")
+  title_grapf <- "Players"
+  
+  # Colores asociados a cada sufijo
+  color_map <- c(
+    "Generales" = "blue",
+    "Ataque" = "purple4",
+    "Defensa" = "wheat2",
+    "Transiciones" = "green4",
+    "Porteria" = "deeppink2"
+  )
+  
+  # Incluir predicted_data en la base de datos general para calcular percentiles
+  dataset <- rbind(dataset, predicted_data)
+  # Convertir las variables a percentiles
+  dataset <- transformar_a_percentil(dataset)
+  
+  # DataFrame para almacenar las áreas
+  areas_df <- data.frame(Grupo = character(), Area = numeric(), stringsAsFactors = FALSE)
+  
+  for (sufijo in sufijos) {
+    
+    # Filtrar las columnas que terminan con el sufijo actual
+    cols_grupo <- grep(sufijo, colnames(dataset), value = TRUE)
+    
+    # Si no hay columnas con el sufijo actual, continuar con el siguiente sufijo
+    if (length(cols_grupo) == 0) {
+      next
+    }
+    
+    # Filtrar los datos del grupo actual
+    dataset_subset <- dataset[nrow(dataset),]
+    
+    datos_jugador <- dataset_subset[, cols_grupo, drop = FALSE]
+    
+    # Preparar los datos para el gráfico de radar
+    datos_radar <- as.data.frame(rbind(rep(1, length(datos_jugador)),
+                                       rep(0, length(datos_jugador)), 
+                                       datos_jugador))
+    rownames(datos_radar) <- NULL
+    
+    # Nombre del archivo PNG
+    nombre_archivo <- paste0("Radar", sufijo, title_grapf, ".png")
+    ruta_archivo <- file.path(output_dir, nombre_archivo)
+    
+    # Guardar el gráfico como PNG con tamaño específico
+    png(ruta_archivo, width = 3000, height = 3000, res = 300)
+    
+    # Configurar los parámetros gráficos
+    op <- par(mar = c(2, 2, 2, 2))  # Ajustar los márgenes
+    
+    # Obtener el color correspondiente al sufijo
+    color <- color_map[[sufijo]]
+    
+    vlabels_modificados <- sub(sufijo, "", names(datos_jugador))
+    
+    # Dibujar el gráfico de radar
+    radarchart(datos_radar, 
+               axistype = 1,
+               pcol = color,
+               pfcol = adjustcolor(color, alpha.f = 0.5),
+               plwd = 2, 
+               plty = 1,  # Configuraciones de líneas
+               cglcol = "grey", cglty = 1, cglwd = 0.8,  # Configuraciones de la cuadrícula
+               axislabcol = "grey",  # Ocultar etiquetas del eje
+               caxislabels = seq(0, 1, 0.25), # Ocultar etiquetas del eje internas
+               vlabels = vlabels_modificados,  # Etiquetas de las variables
+               vlcex = 0.8,  # Tamaño de la fuente de las etiquetas
+               title = paste("Radar Chart -", gsub("_", "", sufijo), title_grapf))  # Título del gráfico
+    
+    # Restaurar los parámetros gráficos originales
+    par(op)
+    
+    # Cerrar el dispositivo gráfico
+    dev.off()
+    
+    # Calcular el área del gráfico de radar
+    n <- length(datos_jugador)
+    angulos <- seq(0, 2 * pi, length.out = n + 1)[1:n]
+    x <- cos(angulos) * datos_jugador
+    y <- sin(angulos) * datos_jugador
+    area <- calcular_area_poligono(x, y)
+    
+    # Agregar el área al dataframe
+    areas_df <- rbind(areas_df, data.frame(Grupo = sufijo, Area = area[[1]], stringsAsFactors = FALSE))
+    rownames(areas_df) <- NULL
+  }
+  
+  return(areas_df)
+}
+
+########################################################################################################################
+########################################################################################################################
+
+## Funcion ampliada
+
+# dataset = player_data[col_4_print_in_prediction]
+# predicted_data = predicted_data
+# output_dir = real_output_dir
+# name_folder = folder
+
+generate_radar_charts2 <- function(dataset, 
+                                  predicted_data, 
+                                  output_dir,
+                                  name_folder) {
+  
+  # Definir los sufijos y los grupos de variables
+  sufijos <- c("Generales", "Ataque", "Defensa", "Transiciones", "Porteria")
+  title_grapf <- "Players"
+  
+  # Colores asociados a cada sufijo
+  color_map <- c(
+    "Generales" = "blue",
+    "Ataque" = "purple4",
+    "Defensa" = "wheat2",
+    "Transiciones" = "green4",
+    "Porteria" = "deeppink2"
+  )
+  
+  # Incluir predicted_data en la base de datos general para calcular percentiles
+  dataset <- rbind(dataset, predicted_data)
+  # Convertir las variables a percentiles
+  dataset <- transformar_a_percentil(dataset)
+  
+  # DataFrame para almacenar las áreas
+  areas_df <- data.frame(Grupo = character(), Real = numeric(), Predicted = numeric(), stringsAsFactors = FALSE)
+  
+  for (sufijo in sufijos) {
+    
+    # Filtrar las columnas que terminan con el sufijo actual
+    cols_grupo <- grep(sufijo, colnames(dataset), value = TRUE)
+    
+    # Si no hay columnas con el sufijo actual, continuar con el siguiente sufijo
+    if (length(cols_grupo) == 0) {
+      next
+    }
+    
+    # Filtrar los datos del grupo actual
+    dataset_subset <- dataset[nrow(dataset),]
+    matching_rows <- dataset[dataset$Season_End_Year == dataset_subset$Season_End_Year & 
+                               dataset$Squad == dataset_subset$Squad & 
+                               dataset$Player == dataset_subset$Player, ]
+    
+    if (nrow(matching_rows) == 2) {
+      # Caso donde hay dos filas que coinciden
+      real_case <- matching_rows[1, cols_grupo, drop = FALSE]
+      predicted_case <- matching_rows[2, cols_grupo, drop = FALSE]
+      
+      datos_radar <- as.data.frame(rbind(rep(1, length(real_case)),
+                                         rep(0, length(real_case)), 
+                                         real_case, predicted_case))
+      rownames(datos_radar) <- NULL
+      
+      nombre_archivo <- paste0("Radar", sufijo, title_grapf, "_Comparativo.png")
+      ruta_archivo <- file.path(output_dir, nombre_archivo)
+      
+      png(ruta_archivo, width = 3000, height = 3000, res = 300)
+      op <- par(mar = c(2, 2, 2, 2))
+      color_real <- adjustcolor(color_map[[sufijo]], alpha.f = 0.75)
+      color_predicted <- adjustcolor(color_map[[sufijo]], alpha.f = 1.25)
+      vlabels_modificados <- sub(sufijo, "", names(real_case))
+      
+      radarchart(datos_radar, 
+                 axistype = 1,
+                 pcol = c(color_real, color_predicted),
+                 pfcol = c(adjustcolor(color_real, alpha.f = 0.3), adjustcolor(color_predicted, alpha.f = 0.3)),
+                 plwd = 2, 
+                 plty = 1:2, 
+                 cglcol = "grey", cglty = 1, cglwd = 0.8, 
+                 axislabcol = "grey", 
+                 caxislabels = seq(0, 1, 0.25), 
+                 vlabels = vlabels_modificados,  
+                 vlcex = 0.8,  
+                 title = paste("Radar Chart -", gsub("_", "", sufijo), title_grapf))
+      
+      legend("topright", legend = c("Real case", "Predicted case"), col = c(color_real, color_predicted), lty = 1:2, lwd = 2, bty = "n")
+      
+      par(op)
+      dev.off()
+      
+      # Calcular el área para real_case
+      n <- length(real_case)
+      angulos <- seq(0, 2 * pi, length.out = n + 1)[1:n]
+      x_real <- cos(angulos) * real_case
+      y_real <- sin(angulos) * real_case
+      area_real <- calcular_area_poligono(x_real, y_real)
+      
+      # Calcular el área para predicted_case
+      x_predicted <- cos(angulos) * predicted_case
+      y_predicted <- sin(angulos) * predicted_case
+      area_predicted <- calcular_area_poligono(x_predicted, y_predicted)
+      
+      # Agregar las áreas al dataframe
+      areas_df <- rbind(areas_df, data.frame(Grupo = sufijo, Real = area_real[[1]], Predicted = area_predicted[[1]], stringsAsFactors = FALSE))
+      
+    } else {
+      # Caso donde solo hay una fila que coincide
+      datos_jugador <- dataset_subset[, cols_grupo, drop = FALSE]
+      
+      datos_radar <- as.data.frame(rbind(rep(1, length(datos_jugador)),
+                                         rep(0, length(datos_jugador)), 
+                                         datos_jugador))
+      rownames(datos_radar) <- NULL
+      
+      nombre_archivo <- paste0("Radar", sufijo, title_grapf, ".png")
+      ruta_archivo <- file.path(output_dir, nombre_archivo)
+      
+      png(ruta_archivo, width = 3000, height = 3000, res = 300)
+      op <- par(mar = c(2, 2, 2, 2))
+      color <- color_map[[sufijo]]
+      vlabels_modificados <- sub(sufijo, "", names(datos_jugador))
+      
+      radarchart(datos_radar, 
+                 axistype = 1,
+                 pcol = color,
+                 pfcol = adjustcolor(color, alpha.f = 0.5),
+                 plwd = 2, 
+                 plty = 1,  
+                 cglcol = "grey", cglty = 1, cglwd = 0.8,  
+                 axislabcol = "grey",  
+                 caxislabels = seq(0, 1, 0.25),  
+                 vlabels = vlabels_modificados,  
+                 vlcex = 0.8,  
+                 title = paste("Radar Chart -", gsub("_", "", sufijo), title_grapf))  
+      
+      par(op)
+      dev.off()
+      
+      # Calcular el área del gráfico de radar
+      n <- length(datos_jugador)
+      angulos <- seq(0, 2 * pi, length.out = n + 1)[1:n]
+      x <- cos(angulos) * datos_jugador
+      y <- sin(angulos) * datos_jugador
+      area <- calcular_area_poligono(x, y)
+      
+      # Agregar el área al dataframe con NA en Predicted
+      areas_df <- rbind(areas_df, data.frame(Grupo = sufijo, Real = area[[1]], Predicted = NA, stringsAsFactors = FALSE))
+    }
+  }
+  
+  return(areas_df)
+}
+
+########################################################################################################################
+########################################################################################################################
+
+########################################################################################################################
+########################################################################################################################
+
+########################################################################################################################
+########################################################################################################################
+
+########################################################################################################################
+########################################################################################################################
+```
+
+**"Micro" Modelos**
+```{r}
+# models_GK <- readRDS("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Code/6. MODELOS/GK/ models_GK_list.rds")
+models_Players <- readRDS("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Code/6. MODELOS/Players/models_Players_list.rds")
+
+
+models_Players$Gls_Standard_Ataque_Players
+```
+
+
+
+**FUNCIÓN PRINCIPAL**
+
+```{r}
+# name_player = "Robert Lewandowski"
+# name_team = "Barcelona"
+# season_predict = "2023"
+# cat_player = "Player"
+# num_iter = 10
+# output_dir = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/6. Prediccion/Pruevas/"
+
+predict_rating <- function(name_player, 
+                           name_team, 
+                           season_predict, 
+                           cat_player, 
+                           num_iter = 10, 
+                           output_dir = ".") {
+  
+  ##################################################################################################################################
+  ########################################## Fase 1: Selección #####################################################################
+  ##################################################################################################################################
+  
+  
+  
+  if (cat_player == "Player") {
+    player_data <- Players_data
+    models <- readRDS("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Code/6. MODELOS/Players/models_Players_list.rds")
+    
+  } else if (cat_player == "GK") {
+    player_data <- GK_data
+    models <- readRDS("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Code/6. MODELOS/GK/ models_GK_list.rds")
+  } else {
+    stop("Únicas categorías aceptadas son 'Player' o 'GK'")
+  }
+  
+  columnas_cluster_players <- grep("Cluster|Pos", names(player_data), value = TRUE)
+  player_data <- dummy_cols(player_data,
+                            select_columns = columnas_cluster_players,
+                            remove_first_dummy = TRUE,
+                            remove_selected_columns = TRUE)
+  columnas_cluster_players <- grep("Cluster|Pos", names(Teams_data), value = TRUE)
+  Teams_data <- dummy_cols(Teams_data,
+                           select_columns = columnas_cluster_players,
+                           remove_first_dummy = TRUE,
+                           remove_selected_columns = TRUE)
+  
+  # Crear nombres válidos para las columnas
+  valid_column_names_players <- make.names(names(player_data))
+  names(player_data) <- valid_column_names_players
+  
+  valid_column_names_Teams <- make.names(names(Teams_data))
+  names(Teams_data) <- valid_column_names_Teams
+  
+  # Identifiquemos si hay caso real o no
+  data_merged <- merge(player_data, Teams_data, by = c("Season_End_Year", "Squad", "Comp"), all = TRUE)
+
+  real_case <- subset(data_merged, 
+                 data_merged$Season_End_Year ==season_predict & data_merged$Squad == name_team & data_merged$Player == name_player)
+  
+  # Verificar que end_year_season sea mayor o igual a 2018
+  if (season_predict < 2019) {
+    stop("El valor de 'end_year_season' debe ser mayor o igual a 2019")
+  }
+  
+  # Filtrar la base de datos para encontrar las filas que cumplan con las condiciones
+  filtered_data_players <- subset(player_data, Player == name_player & Season_End_Year < season_predict)
+  
+  # Seleccionamos la temporada mas proxima a la prediccion
+  closest_row_player <- filtered_data_players[which.max(filtered_data_players$Season_End_Year), ]
+  
+  # Verificar que existan filas que cumplan con las condiciones
+  if (nrow(filtered_data_players) == 0) {
+    stop(paste("El jugador especificado no existe en la base de datos de", cat_player))
+  }
+  
+  filtered_data_teams <- subset(Teams_data, Squad == name_team & Season_End_Year < season_predict)
+  # Seleccionamos la temporada mas proxima a la prediccion
+  closest_row_teams <- filtered_data_teams[which.max(filtered_data_teams$Season_End_Year), ] 
+  
+  # Valores Originales
+  og_player_squad <- closest_row_player$Squad
+  og_player_comp <- closest_row_player$Comp
+  if (cat_player == "Player") {
+  og_player_age <- closest_row_player$Age_Players
+  }else if (cat_player == "GK") {
+    og_player_age <- closest_row_player$Age_GK
+  }
+  og_player_season <- closest_row_player$Season_End_Year
+  
+  # Valores modificados
+  closest_row_player$Squad <- closest_row_teams$Squad
+  closest_row_player$Comp <- closest_row_teams$Comp
+  
+  if (cat_player == "Player") {
+  closest_row_player$Age_Players <- closest_row_player$Age_Players + (as.numeric(season_predict) - closest_row_player$Season_End_Year)
+  }else if (cat_player == "GK") {
+    closest_row_player$Age_GK <- closest_row_player$Age_GK + (as.numeric(season_predict) - closest_row_player$Season_End_Year)
+    } 
+  closest_row_player$Season_End_Year <- closest_row_teams$Season_End_Year <- as.numeric(season_predict)
+  
+  # Verificar que existan filas que cumplan con las condiciones
+  if (nrow(filtered_data_teams) == 0) {
+    stop(paste("El equipo especificado no existe en la base de datos"))
+  }
+  
+  filtered_data <- merge(closest_row_player, closest_row_teams, by = c("Season_End_Year", "Squad", "Comp"), all = TRUE)
+  
+  # Verificar que se haya encontrado una fila válida
+  if (nrow(filtered_data) == 0) {
+    stop("No hay registros del equipo y/o jugador previos a la 'season_predict' especificada")
+  }
+  
+  filtered_data_og <- filtered_data
+  
+  filtered_data_og$Squad <- og_player_squad
+  filtered_data_og$Comp <- og_player_comp
+  if (cat_player == "Player") {
+    filtered_data_og$Age_Players <- og_player_age
+    }else if (cat_player == "GK") {
+      filtered_data_og$Age_GK <- og_player_age
+    }
+  
+  filtered_data_og$Season_End_Year <- og_player_season
+  
+  ##################################################################################################################################
+  ########################################## Fase 2: Predicción ####################################################################
+  ##################################################################################################################################
+  
+  # Crear una lista para almacenar las predicciones en cada iteración
+  predictions_history <- list()
+  
+  # Rellenar la lista con matrices de la dimensionalidad especificada
+  for (i in seq_along(names(models))) {
+    predictions_history[[names(models)[i]]] <-  matrix(NA, nrow = nrow(filtered_data), ncol = num_iter)
+  }
+  
+  # Iterar sobre las variables de respuesta
+  for (iter in 1:num_iter) {
+    
+    for (response_var in names(models)) {
+      
+      # response_var = response_vars[1]
+      predictions_i <- simulate_predict(models[[response_var]], filtered_data)
+      filtered_data[response_var] <- predictions_i
+      filtered_data <- replace_negatives_with_zero(filtered_data)
+      
+      # Guardar la matriz de predicciones para la variable actual
+      predictions_history[[response_var]][,iter] <- filtered_data[[response_var]]
+    }
+  }
+  
+  for(response_var in names(models)){
+    filtered_data[response_var] <- predictions_history[[response_var]][,num_iter]
+  }
+  
+  if (cat_player == "Player") {
+  col_4_print_in_prediction <- unique(c("Season_End_Year", "Squad", "Comp", "Player", "Nation_Players", "Age_Players", names(models)))
+  }else if (cat_player == "GK") {
+    col_4_print_in_prediction <- unique(c("Season_End_Year", "Squad", "Comp", "Player", "Nation_GK", "Age_GK", names(models)))
+    } 
+  
+  
+  predicted_data <- replace_negatives_with_zero(filtered_data[col_4_print_in_prediction])
+  ##################################################################################################################################
+  ########################################## Fase 3: Visualizaciones ###############################################################
+  ##################################################################################################################################
+  
+  folder = paste0(name_player, name_team, season_predict, collapse = "_")
+  
+  real_output_dir = paste0(output_dir, folder)
+  
+  # Crear el directorio de salida si no existe
+  if (!dir.exists(real_output_dir)) {
+    dir.create(real_output_dir, recursive = TRUE)
+  }
+  
+  
+  areas <- generate_radar_charts2(dataset = player_data[col_4_print_in_prediction],
+                                 predicted_data = predicted_data,
+                                 output_dir = real_output_dir,
+                                 name_folder = folder)
+  
+  if(nrow(real_case) == 0){
+    # Exportar filtered_data_og y predicted_data a un archivo Excel
+    export_file <- paste0(real_output_dir, "/", name_player, "_", name_team, "_", season_predict, ".xlsx")
+    wb <- createWorkbook()
+    addWorksheet(wb, "Filtered Data OG")
+    addWorksheet(wb, "Predicted Data")
+    addWorksheet(wb, "Predicted Areas")
+    writeData(wb, sheet = "Filtered Data OG", filtered_data_og)
+    writeData(wb, sheet = "Predicted Data", predicted_data)
+    writeData(wb, sheet = "Predicted Areas", areas)
+    saveWorkbook(wb, export_file, overwrite = TRUE)
+    
+    # Retornar los elementos deseados
+    return(list(filtered_data_og = filtered_data_og,
+                predicted_data = predicted_data,
+                areas = areas))
+  }else{
+    # Exportar filtered_data_og y predicted_data a un archivo Excel
+    export_file <- paste0(real_output_dir, "/", name_player, "_", name_team, "_", season_predict, ".xlsx")
+    wb <- createWorkbook()
+    addWorksheet(wb, "Filtered Data OG")
+    addWorksheet(wb, "Real Data")
+    addWorksheet(wb, "Predicted Data")
+    addWorksheet(wb, "Predicted Areas")
+    writeData(wb, sheet = "Filtered Data OG", filtered_data_og[col_4_print_in_prediction])
+    writeData(wb, sheet = "Real Data", real_case[col_4_print_in_prediction])
+    writeData(wb, sheet = "Predicted Data", predicted_data)
+    writeData(wb, sheet = "Predicted Areas", areas)
+    saveWorkbook(wb, export_file, overwrite = TRUE)
+    
+    # Retornar los elementos deseados
+    return(list(filtered_data_og = filtered_data_og,
+                real_data = real_case[col_4_print_in_prediction],
+                predicted_data = predicted_data,
+                areas = areas))
+  }
+  
+  
+  
+}
+
+```
+
+
+```{r}
+predict_player <- predict_rating(name_player = "Unai Simón",
+                                 name_team = "Athletic Club",
+                                 season_predict = "2023",
+                                 cat_player = "GK",
+                                 num_iter = 10,
+                                 output_dir = "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/6. Prediccion/Pruevas/")
+
+## player
+# predict <- as.numeric(predict_player$predicted_data[,7:64])
+# real <- as.numeric(predict_player$real_data[,7:64])
+
+## GK
+predict <- as.numeric(predict_player$predicted_data[,6:21])
+real <- as.numeric(predict_player$real_data[,6:21])
+
+# Calcular el MAPE
+# Definir la función para calcular el MAPE
+mean_absolute_percentage_error <- function(real, predict) {
+  
+  # Filtrar los valores donde real no es igual a cero
+  non_zero_indices <- which(real != 0)
+  real_non_zero <- real[non_zero_indices]
+  predict_non_zero <- predict[non_zero_indices]
+  
+  MAPE_vector <- c()
+  
+  for(i in 1:length(real_non_zero)){
+    mape_value <- abs((real_non_zero[i] - predict_non_zero[i])/real_non_zero[i]) * 100
+    MAPE_vector <- c(MAPE_vector, mape_value)
+  }
+  
+  MAPE <- mean(MAPE_vector)
+  
+  return(list(MAPE = MAPE,
+              MAPE_vector = MAPE_vector))
+  
+}
+
+MAPE <- mean_absolute_percentage_error(real, predict)
+print(paste("Error Absoluto Medio Porcentual (MAPE):", MAPE$MAPE))
+
+
+print(paste("Diferencias de Areas",predict_player$areas[,1], ": ", predict_player$areas[,2] - predict_player$areas[,3]))
+
+```
+
+
+```{r}
+Players_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_noGK_data_clustered.csv", 
+    col_types = cols(Cluster = col_character()))
+
+Players_cols_to_rename <- names(Players_data)[5:length(names(Players_data))]
+Players_data <- Players_data %>%
+  rename_with(~paste0(., "_Players"), all_of(Players_cols_to_rename))
+
+
+subset(Players_data, Players_data$Player == "Achraf Hakimi")
+```
+
+```{r}
+## Porteros
+GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_GK_data_clustered.csv", 
+    col_types = cols(Cluster = col_character()))[,-6]
+
+GK_cols_to_rename <- names(GK_data)[5:22]
+GK_data <- GK_data %>%
+  rename_with(~paste0(., "_GK"), all_of(GK_cols_to_rename))
+
+subset(GK_data, GK_data$Player == "Unai Simón")
+```
+
+
+
+
+
+
+
+
+

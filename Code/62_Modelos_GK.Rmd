@@ -1,0 +1,425 @@
+---
+title: "Algoritmo de Predicción - Porteros"
+author: "Ricard Sierra"
+date: '2024-05-25'
+output: html_document
+---
+
+**Paqueteria**
+```{r}
+library(readr)
+library(nlme)
+library(dplyr)
+library(caret)
+library(MASS)
+library(Metrics) # Para calcular el RMSE
+library(rpart)
+library(tidyr)
+library(lme4)
+library(glmmTMB)
+library(fastDummies)
+library(Matrix)
+```
+
+```{r}
+# Hay variables que no tienen sentido que sean negativas, esta funcion las convierte en 0 en caso de que lo sean
+replace_negatives_with_zero <- function(df) {
+  # Definir los nombres de las variables sin el sufijo "_Player" que no deberían ser negativas
+  variables_no_negative <- c(
+    "Min_Playing.Time_Generales", "Min_percent_Playing.Time_Generales", 
+    "Compl_Starts_Generales", "MP_Playing.Time_Generales", 
+    "Recov_Generales", "Fls_Generales", "indiscipline_index_Generales", 
+    "Crs_Generales", "Aerial_compose_Index_Generales", "Gls_Standard_Ataque", 
+    "Sh_Standard_Ataque", "SoT_percent_Standard_Ataque", "Sh_per_90_Standard_Ataque", 
+    "FK_Standard_Ataque", "SCA_SCA_Ataque", "Eff_SCA_GCA_Ataque", 
+    "TO_SCA_Ataque", "Sh_SCA_Ataque", "Eff_Sh_SCA_GCA_Ataque", 
+    "Fld_SCA_Ataque", "Eff_Fld_SCA_GCA_Ataque", "PassDead_SCA_Ataque", 
+    "Def_SCA_Ataque", "Att_Total_Transiciones", "Cmp_percent_Total_Transiciones", 
+    "Cmp_percent_Short_Transiciones", "Cmp_percent_Medium_Transiciones", 
+    "Cmp_percent_Long_Transiciones", "PrgP_Transiciones", "MeanDist_Total_Transiciones", 
+    "Live_Pass_Transiciones", "Off_Outcomes_Transiciones", "Blocks_Outcomes_Transiciones", 
+    "CK_Pass_Transiciones", "Sw_Pass_Transiciones", "Final_Third_Carries_Transiciones", 
+    "PrgC_Carries_Transiciones", "TotDist_Carries_Transiciones", "Att_Take_Transiciones", 
+    "Succ_percent_Take_Transiciones", "Frac_DefPen_Touches_Transiciones", 
+    "Frac_Def3rd_Touches_Transiciones", "Frac_Mid3rd_Touches_Transiciones", 
+    "Frac_Att3rd_Touches_Transiciones", "Frac_AttPen_Touches_Transiciones", 
+    "Tkl.Int_Defensa", "Att_Challenges_Defensa", "Blocks_Blocks_Defensa", 
+    "Frac_Def3rd_Tackles_Defensa", "Frac_Mid3rd_Tackles_Defensa", 
+    "Frac_Att3rd_Tackles_Defensa", "Mins_Per_90", "Stp_crosses_compose_index", 
+    "Save_compose_index", "Att (GK)_Passes", "Launched_compose_index", 
+    "OPA_per_90_Sweeper", "Save_penalty_compose_index"
+  )
+  
+  # Iterar sobre las variables y reemplazar los valores negativos por 0
+  for (variable in variables_no_negative) {
+    matching_columns <- grep(variable, names(df), value = TRUE)
+    for (col in matching_columns) {
+      df[[col]][df[[col]] < 0] <- 0
+    }
+  }
+  
+  return(df)
+}
+```
+
+**BBDD**
+```{r}
+# Porteros (largo)
+GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_GK_data_clustered.csv", 
+    col_types = cols(Cluster = col_character()))[,-6]
+
+GK_cols_to_rename <- names(GK_data)[5:22]
+GK_data <- GK_data %>%
+  rename_with(~paste0(., "_GK"), all_of(GK_cols_to_rename))
+
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Teams_data_clustered.csv", 
+    col_types = cols(Cluster = col_character()))
+
+Teams_cols_to_rename <- names(Teams_data)[4:61]
+Teams_data <- Teams_data %>%
+  rename_with(~paste0(., "_Teams"), all_of(Teams_cols_to_rename))
+
+# Realizar el merge
+GK_merged <- merge(GK_data, Teams_data, by = c("Season_End_Year", "Squad", "Comp"), all = TRUE)
+```
+
+
+# Modelos GK
+
+Hacemos las transformaciones necessarias; fijamos train y test; y seleccionamos las variables respuesta y predictoras
+```{r}
+columnas_cluster <- grep("Cluster", names(GK_merged), value = TRUE)
+GK_merged_with_dummies <- dummy_cols(GK_merged, 
+                                     select_columns = columnas_cluster, 
+                                     remove_first_dummy = TRUE, 
+                                     remove_selected_columns = TRUE)
+
+# Crear nombres válidos para las columnas
+valid_column_names <- make.names(names(GK_merged_with_dummies))
+names(GK_merged_with_dummies) <- valid_column_names
+
+year_threshold <- 2023
+
+# Dividimos los datos en train (las 5 primeras temporadas) y test (temporada 2022 - 2023)
+GK_merged_train <- subset(GK_merged_with_dummies, GK_merged_with_dummies$Season_End_Year < year_threshold)
+GK_merged_test <- subset(GK_merged_with_dummies, GK_merged_with_dummies$Season_End_Year >= year_threshold)
+
+
+# Definimos las variables respuestas (solo GK)
+response_vars <- grep("_GK$", valid_column_names, value = TRUE)
+response_eliminar  <- grep(c("Nation|Age"), response_vars, value = TRUE)
+response_vars <- response_vars[!response_vars %in% response_eliminar]
+
+
+# DefinimoS las variables predictoras (GK + Teams incluyendo clusters)
+predictor_vars <- grep("_GK|_Teams", valid_column_names, value = TRUE)
+predictor_eliminar  <- grep(c("Nation"), predictor_vars, value = TRUE)
+predictor_vars <- predictor_vars[!predictor_vars %in% predictor_eliminar]
+```
+
+*Funciones de transformación*
+```{r}
+# Calcular la media y la varianza para cada variable y guardarlas en una lista
+calcular_estadisticas <- function(df, variables) {
+  
+  df_numericas <- df[, sapply(df, is.numeric)]
+
+  estadisticas <- lapply(variables, function(var) {
+    media <- mean(df_numericas[[var]], na.rm = TRUE)
+    varianza <- var(df_numericas[[var]], na.rm = TRUE)
+    list(media = media, varianza = varianza)
+  })
+  names(estadisticas) <- variables
+  return(estadisticas)
+}
+
+# Escalar las variables utilizando la media y la varianza guardadas
+escalar_datos <- function(df, variables, estadisticas) {
+  df_escalado <- df
+  for (var in variables) {
+    df_escalado[[var]] <- (df[[var]] - estadisticas[[var]]$media) / sqrt(estadisticas[[var]]$varianza)
+  }
+  return(df_escalado)
+}
+
+# Para desecalar las predicciones
+desescalar_predicciones <- function(predicciones, variables, estadisticas) {
+  predicciones_desescaladas <- predicciones
+  for (var in variables) {
+    predicciones_desescaladas[[var]] <- predicciones[[var]] * sqrt(estadisticas[[var]]$varianza) + estadisticas[[var]]$media
+  }
+  return(predicciones_desescaladas)
+}
+
+```
+
+
+Creación de los modelos
+```{r}
+# Inicializar lista para almacenar los modelos
+estadisticas_train <- calcular_estadisticas(GK_merged_train, predictor_vars)
+
+models_GK <- list()
+
+for (response_var in response_vars) {
+  
+  # response_var = response_vars[1]
+  cat("Ajustando modelo para:", response_var, "\n")
+  
+  # Excluir la variable respuesta de las predictoras
+  predictors <- setdiff(predictor_vars, response_var)
+  
+  # Verificar y eliminar variables altamente correlacionadas
+  predictor_data <- GK_merged_train[, predictors, drop = FALSE]
+  corr_matrix <- cor(predictor_data, use = "pairwise.complete.obs")
+  high_corr_vars <- findCorrelation(corr_matrix, cutoff = 0.9)
+  predictors <- predictors[-high_corr_vars]
+  
+  # Verificar y eliminar variables con baja varianza
+  low_var_vars <- caret::nearZeroVar(GK_merged_train[predictors], saveMetrics = TRUE)
+  predictors <- rownames(low_var_vars)[!low_var_vars$nzv]
+  
+  # Seleccionar variables altamente correlacionadas con la variable respuesta
+  cor_with_response <- sapply(GK_merged_train[predictors], 
+                              function(x) cor(x, GK_merged_train[[response_var]], use = "complete.obs"))
+  
+  high_cor_predictors <- names(cor_with_response[abs(cor_with_response) > 0.2]) # Usar un umbral de 0.2
+  
+  # Combinar los métodos de selección
+  final_predictors <- high_cor_predictors
+  
+  # Estandarizar las variables predictoras seleccionadas
+  
+  cluster_columns <- grep("Cluster", final_predictors, value = TRUE)
+
+  # if (length(cluster_columns) > 0) {
+  #   # Identificamos las columnas que no contienen "Cluster"
+  #   non_cluster_columns <- setdiff(final_predictors, cluster_columns)
+  #   
+  #   # Escalar solo las columnas que no contienen "Cluster" en el dataframe de entrenamiento
+  #   GK_merged_train[non_cluster_columns] <- scale(GK_merged_train[non_cluster_columns])
+  #   
+  #   # Escalar solo las columnas que no contienen "Cluster" en el dataframe de prueba
+  #   GK_merged_test[non_cluster_columns] <- scale(GK_merged_test[non_cluster_columns])
+  # } else {
+  #   # Si no hay columnas "Cluster", escalar todas las columnas especificadas
+  #   GK_merged_train[final_predictors] <- scale(GK_merged_train[final_predictors])
+  #   GK_merged_test[final_predictors] <- scale(GK_merged_test[final_predictors])
+  # }
+  
+  # Crear la fórmula dinámica inicial
+  formula_str <- paste(response_var, "~", paste(final_predictors, collapse = " + "))
+  formula_dynamic <- as.formula(formula_str)
+  
+  tryCatch({
+    initial_model <- lm(formula_dynamic, data = GK_merged_train)
+    
+    # Selección automatizada de variables utilizando stepAIC
+    stepwise_model <- stepAIC(initial_model, direction = "both", trace = FALSE)
+    
+    # Extraer la fórmula seleccionada
+    selected_formula <- as.formula(paste(deparse(stepwise_model$terms)))
+    
+    # Convertir la fórmula seleccionada a una cadena de texto
+    selected_formula_text <- paste(deparse(selected_formula), collapse = "")
+    final_formula_text <- paste(selected_formula_text) #), "+ Season_End_Year")
+    final_formula <- as.formula(final_formula_text)
+    
+    # Ajustar el modelo usando nlme
+    final_model <- lme(
+      fixed = final_formula,
+      random = ~ Season_End_Year | Player,
+      # correlation = corAR1(from = ~ Season_End_Year | Player),
+      data = GK_merged_train
+      )
+
+    
+    # Ajustar el modelo GLMM utilizando glmmTMB
+    # final_model <- glmmTMB(
+    #       formula = Min_Playing.Time_Generales_GK ~ Season_End_Year + (1 | Comp), 
+    #      data = GK_merged_train,
+    #       family = Gamma(link = "log"),
+    #       # control = glmmTMBControl(optimizer = nlminb),
+    #       control = control,
+    #       start = init_params
+    #       )
+    models_GK[[response_var]] <- final_model
+  }, error = function(e) {
+    message(paste("Error fitting model for response variable", response_var, ":", e$message))
+  })
+  
+}
+
+# Definir el directorio de salida para los modelos
+output_dir <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Code/6. MODELOS/GK/"  # Cambia esto a tu ruta deseada
+
+# Crear el directorio si no existe
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+saveRDS(models_GK, file = paste(output_dir, "models_GK_list.rds"))
+
+# Si se quieres importar
+# models_GK <- readRDS("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Code/6. MODELOS/GK/ models_GK_list.rds")
+
+
+```
+
+
+
+
+Seleccionamos los datos chorentes, de los que dispondriamos en un caso real, para la prediccion
+```{r}
+set.seed(410)
+GK_subset <- subset(GK_merged_with_dummies, GK_merged_with_dummies$Season_End_Year == 2022)
+GK_subset_muestra <- GK_subset[sample(nrow(GK_subset), 50), ]
+GK_subset_muestra_4_predict <- GK_subset_muestra[, c("Player" , grep("_GK", valid_column_names, value = TRUE))]
+GK_subset_muestra_4_predict$Age_GK <- GK_subset_muestra_4_predict$Age_GK + 1 
+
+
+Teams_subset <- subset(GK_merged_with_dummies, GK_merged_with_dummies$Season_End_Year == 2022)
+Teams_subset_muestra <- Teams_subset[sample(nrow(Teams_subset), 50), ]
+Teams_subset_muestra_4_predict <- Teams_subset_muestra[, c("Squad" , grep("_Teams", valid_column_names, value = TRUE))]
+
+data_4_predict <- cbind(GK_subset_muestra_4_predict, Teams_subset_muestra_4_predict)
+# data_4_predict_scale <- escalar_datos(df = data_4_predict, 
+#                                       variables = colnames(data_4_predict)[c(4:19, 23:79)], 
+#                                       estadisticas = estadisticas_train)
+data_4_predict$Season_End_Year <- rep(2023, 50)
+```
+
+
+```{r}
+# Función para calcular predicciones usando simulate
+simulate_predict <- function(model, newdata) {
+  fixed_effects <- fixef(model)
+  random_effects <- ranef(model)
+  pred_fixed <- model.matrix(model$terms, newdata) %*% fixed_effects
+  
+  newdata$Player <- as.factor(newdata$Player) # Ensure the grouping variable is a factor
+  groups <- unique(newdata$Player)
+  pred_random <- numeric(nrow(newdata))
+  
+  for (group in groups) {
+    group_idx <- which(newdata$Player == group)
+    if (group %in% names(random_effects[[1]])) {
+      pred_random[group_idx] <- random_effects[[1]][group, "(Intercept)"]
+    } else {
+      pred_random[group_idx] <- 0
+    }
+  }
+  
+  predictions <- pred_fixed + pred_random
+  return(predictions)
+}
+```
+
+
+Realizamos las predicciones iterativas y vemos en que punto convergen
+```{r}
+# Supongamos que tienes una lista de modelos llamada models_GK y un dataframe de prueba GK_merged_test
+# y que las variables de respuesta están en response_vars
+
+# Definir el número de iteraciones
+num_iter <- 100
+
+# Crear una lista para almacenar las predicciones en cada iteración
+predictions_history <- list()
+
+# Rellenar la lista con matrices de la dimensionalidad especificada
+for (i in seq_along(response_vars)) {
+  predictions_history[[response_vars[i]]] <-  matrix(NA, nrow = nrow(data_4_predict), ncol = num_iter)
+}
+
+# Iterar sobre las variables de respuesta
+for (iter in 1:num_iter) {
+  # iter = 1
+  for (response_var in response_vars) {
+    # response_var = response_vars[1]
+    predictions_i <- simulate_predict(models_GK[[response_var]], data_4_predict)
+    data_4_predict[response_var] <- predictions_i
+    data_4_predict <- replace_negatives_with_zero(data_4_predict)
+
+    # Guardar la matriz de predicciones para la variable actual
+    predictions_history[[response_var]][,iter] <- data_4_predict[[response_var]]
+}
+  }
+
+# predictions_history$Min_Playing.Time_Generales_GK
+# Ahora predictions_history contiene una matriz de predicciones para cada variable de respuesta
+```
+
+
+```{r}
+# Definir la función para crear gráficos individuales y guardarlos como archivos PNG
+crear_y_guardar_grafico <- function(pred_matrix, response_var, num_iter, data_4_predict, output_dir) {
+  # Determinar los límites del eje y en función de los datos
+  y_limits <- range(pred_matrix, na.rm = TRUE)
+  
+  # Definir el nombre del archivo
+  file_name <- paste(output_dir, paste("Evolucion_Predicciones_", response_var, ".png", sep = ""), sep = "/")
+  
+  # Abrir un dispositivo gráfico PNG
+  png(filename = file_name, width = 800, height = 600)
+  
+  # Crear el gráfico base con ejes claramente visibles
+  plot(1:(num_iter-1), pred_matrix[1,], type = "n", xlab = "Iteración", ylab = "Predicción", 
+       main = paste("Evolución Predicciones", response_var, num_iter ,"times"), ylim = y_limits)
+  
+  # Añadir las líneas de predicciones individuales
+  matlines(t(pred_matrix), lty = 1, col = rainbow(nrow(data_4_predict)))
+  
+  # Cerrar el dispositivo gráfico
+  dev.off()
+  
+  # Crear el gráfico nuevamente en un dispositivo gráfico activo para capturarlo
+  plot(1:(num_iter-1), pred_matrix[1,], type = "n", xlab = "Iteración", ylab = "Predicción", 
+       main = paste("Evolución Predicciones", response_var, num_iter ,"times"), ylim = y_limits)
+  matlines(t(pred_matrix), lty = 1, col = rainbow(nrow(data_4_predict)))
+  
+  # Guardar el gráfico como un objeto
+  grafico <- recordPlot()
+  
+  return(grafico)
+}
+
+# Crear una lista para almacenar los gráficos
+graficos <- list()
+
+# Definir el directorio de salida para los archivos PNG
+output_dir <- "C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/IMG/6. Prediccion/1. Variacion_Pred_times/POR/"  # Cambia esto a tu ruta deseada
+
+# Crear el directorio si no existe
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# Crear gráficos para cada variable de respuesta, guardarlos y almacenarlos
+for (response_var in response_vars) {
+  # Obtener la matriz de predicciones para la variable actual
+  pred_matrix <- predictions_history[[response_var]][, 1:(num_iter-1)]
+  
+  # Crear, guardar y almacenar el gráfico de evolución
+  grafico <- crear_y_guardar_grafico(pred_matrix, response_var, num_iter, data_4_predict, output_dir)
+  
+  # Almacenar el gráfico en la lista
+  graficos[[response_var]] <- grafico
+}
+
+# Ajustar la disposición de los gráficos en un panel y los márgenes
+par(mfrow = c(ceiling(length(response_vars) / 2), 2), mar = c(4, 4, 2, 1))
+
+# Imprimir los gráficos
+for (response_var in response_vars) {
+  print(graficos[[response_var]])
+}
+
+# Restablecer la disposición de los gráficos
+par(mfrow = c(1, 1))
+
+```
+
+
+
+

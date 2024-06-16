@@ -1,0 +1,100 @@
+---
+title: "Pruevas Grafico Radar"
+author: "Ricard Sierra"
+date: '2024-05-16'
+output: html_document
+---
+
+```{r}
+# install.packages("fmsb")
+if (!require("ggrepel")) install.packages("ggrepel")
+
+library(fmsb)
+library(ggplot2)
+library(ggiraphExtra)
+library(ggrepel)
+
+```
+
+
+```{r}
+# Instalar y cargar el paquete fmsb
+# Instalar y cargar el paquete fmsb
+# install.packages("fmsb")
+library(fmsb)
+
+# Crear datos de ejemplo normalizados correctamente
+set.seed(123)  # Para reproducibilidad
+datos <- as.data.frame(matrix(runif(10 * 5, min = 0, max = 1), ncol = 5))
+colnames(datos) <- c("Criterio1", "Criterio2", "Criterio3", "Criterio4", "Criterio5")
+
+# Añadir la primera columna al final para cerrar el radar
+datos_norm <- datos[1:3,]
+
+# Crear una nueva fila con los mínimos y máximos para la escala
+datos_radar <- rbind(rep(0, ncol(datos_norm)), rep(1, ncol(datos_norm)), datos_norm)
+
+# Colores personalizados para cada grupo
+colores_lineas <- c("#FF6347", "#4682B4", "#32CD32")
+colores_rellenos <- adjustcolor(colores_lineas, alpha.f = 0.5)
+
+# Guardar el gráfico como PNG con tamaño específico
+png("grafico_radar.png", width = 1200, height = 1200, res = 150)
+
+# Configurar los parámetros gráficos
+op <- par(mar = c(2, 2, 2, 2))  # Ajustar los márgenes
+  
+# Dibujar el gráfico de radar
+radarchart(datos_radar, axistype = 1,
+           pcol = colores_lineas,
+           pfcol = colores_rellenos,
+           plwd = 2, plty = 1,  # Configuraciones de líneas
+           cglcol = "grey", cglty = 1, cglwd = 0.8,  # Configuraciones de la cuadrícula
+           axislabcol = "grey",  # Ocultar etiquetas del eje
+           caxislabels = seq(0, 1, 0.25), # Ocultar etiquetas del eje internas
+           vlabels = colnames(datos),  # Etiquetas de las variables
+           title = "Titulo")  # Título del gráfico
+
+# Añadir una leyenda fuera del gráfico con cuadrados
+legend(x = 1.5, y = 1, 
+       legend = paste("Fila", 1:nrow(datos_norm)), 
+       fill = colores_rellenos, 
+       border = colores_lineas, 
+       bty = "o", 
+       cex = 0.8)
+
+# Restaurar los parámetros gráficos originales
+par(op)
+
+# Cerrar el dispositivo gráfico
+dev.off()
+```
+
+
+```{r}
+# Función para calcular el área de un polígono a partir de sus vértices
+calcular_area_poligono <- function(x, y) {
+  n <- length(x)
+  area <- 0
+  j <- n # Inicializando j al último vértice del polígono
+  for (i in 1:n) {
+    area <- area + (x[j] + x[i]) * (y[j] - y[i])
+    j <- i  # j es previo a i
+  }
+  return(abs(area / 2))
+}
+
+# Calcular el área para cada fila
+areas <- apply(datos_norm, 1, function(fila) {
+  n <- length(fila) - 1
+  angulos <- seq(0, 2 * pi, length.out = n + 1)[1:n]
+  x <- cos(angulos) * fila[1:n]
+  y <- sin(angulos) * fila[1:n]
+  calcular_area_poligono(x, y)
+})
+
+# Mostrar las áreas calculadas
+print(areas)
+```
+
+

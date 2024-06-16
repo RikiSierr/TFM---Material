@@ -1,0 +1,894 @@
+---
+title: "Pruevas de modelos"
+author: "Ricard Sierra"
+date: '2024-05-22'
+output: html_document
+---
+**Paqueteria**
+```{r}
+library(readr)
+library(nlme)
+library(dplyr)
+library(caret)
+library(MASS)
+library(Metrics) # Para calcular el RMSE
+library(rpart)
+library(tidyr)
+library(randomForest)
+library(xgboost)
+library(lme4)
+```
+
+**BBDD**
+```{r}
+#Porteros + Equipos retardados
+GK_retarded <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Retarded_Data/GK_retarded.csv")
+# head(GK_retarded)
+
+# Porteros (largo)
+GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_GK_data_clustered.csv")[,-6]
+
+GK_cols_to_rename <- names(GK_data)[5:22]
+GK_data <- GK_data %>%
+  rename_with(~paste0(., "_GK"), all_of(GK_cols_to_rename))
+
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Teams_data_clustered.csv")
+Teams_cols_to_rename <- names(Teams_data)[4:61]
+Teams_data <- Teams_data %>%
+  rename_with(~paste0(., "_Teams"), all_of(Teams_cols_to_rename))
+
+# Realizar el merge
+GK_merged <- merge(GK_data, Teams_data, by = c("Season_End_Year", "Squad", "Comp"), all = TRUE)
+```
+
+
+
+# Linear Mixed Models
+
+Los Modelos Lineales Mixtos (LMM) son una extensión de los modelos lineales que permiten manejar datos que tienen múltiples niveles de variabilidad. Estos modelos son útiles cuando los datos están agrupados de alguna manera, como en estudios longitudinales donde las mismas unidades (individuos, escuelas, etc.) son medidas en múltiples ocasiones.
+
+- Efectos Fijos: Representan las relaciones promedio en la población. Por ejemplo, el efecto de la edad sobre el tiempo de juego.
+
+- Efectos Aleatorios: Permiten que estas relaciones varíen entre grupos. Por ejemplo, cada jugador puede tener un intercepto diferente.
+
+Cuando los datos son longitudinales (mediciones repetidas a lo largo del tiempo), es crucial tener en cuenta la estructura temporal para capturar la autocorrelación (dependencia) entre las mediciones en diferentes puntos temporales. Ignorar esta estructura puede llevar a inferencias incorrectas.
+
+Autocorrelación Temporal
+La autocorrelación temporal se refiere a cómo las observaciones de una variable en un punto en el tiempo están correlacionadas con las observaciones de esa misma variable en momentos posteriores. En los datos longitudinales, las observaciones de un mismo sujeto (jugador, en este caso) suelen estar correlacionadas temporalmente.
+
+Un modelo AR(1) (AutoRegresivo de orden 1) asume que cada observación está correlacionada con la observación inmediatamente anterior. Esto es adecuado para datos donde esperamos que el efecto de una observación decaiga exponencialmente a medida que nos alejamos en el tiempo.
+
+¿Por qué usar corAR1 y un Índice de Tiempo?
+
+- La estructura corAR1 permite modelar cómo las observaciones están correlacionadas en el tiempo dentro de cada grupo (jugador). Esto es crucial para obtener inferencias precisas y reducir sesgos.
+
+- Para que corAR1 funcione correctamente, cada combinación de grupo (Player) y covariable temporal (Time_Index) debe ser única. Esto asegura que la correlación se calcule correctamente para cada punto en el tiempo.
+
+```{r}
+# Suponiendo que GK_data es tu conjunto de datos original
+
+# Ordenar los datos por Player y Season_End_Year
+# Esto asegura que los datos estén en orden temporal dentro de cada jugador
+GK_merged <- GK_merged %>%
+  arrange(Player, Season_End_Year)
+
+# Crear un índice de tiempo artificial dentro de cada Player
+# Esto garantiza que cada observación tenga un valor temporal único dentro de cada jugador
+GK_merged <- GK_merged %>%
+  group_by(Player) %>%
+  mutate(Time_Index = row_number())
+
+
+
+# Verificar la estructura del dataframe después de agregar el índice de tiempo
+# Esto nos ayuda a asegurarnos de que el índice de tiempo se ha creado correctamente
+head(GK_merged)
+```
+
+- Ajustar el modelo lineal mixto con la componente temporal usando el índice de tiempo artificial
+-  fixed: Especifica los efectos fijos del modelo (Age y Season_End_Year)
+-  random: Especifica los efectos aleatorios del modelo (intercepto aleatorio para cada Player)
+-  correlation: Especifica la estructura de autocorrelación AR(1) usando el índice de tiempo artificial
+
+```{r}
+# Función para convertir números a números romanos
+toRoman <- function(num) {
+  romanNumerals <- c(
+    "M" = 1000, "CM" = 900, "D" = 500, "CD" = 400,
+    "C" = 100, "XC" = 90, "L" = 50, "XL" = 40,
+    "X" = 10, "IX" = 9, "V" = 5, "IV" = 4, "I" = 1
+  )
+  
+  result <- ""
+  for (key in names(romanNumerals)) {
+    while (num >= romanNumerals[[key]]) {
+      result <- paste0(result, key)
+      num <- num - romanNumerals[[key]]
+    }
+  }
+  return(result)
+}
+```
+
+
+```{r}
+# Supongamos que GK_merged es tu conjunto de datos original
+
+# Crear nombres válidos para las columnas y generar nombres simples
+valid_column_names <- make.names(names(GK_merged))
+simple_names <- sapply(seq_along(valid_column_names), toRoman)
+name_map <- setNames(simple_names, valid_column_names)
+
+# Asignar los nombres simples al data frame
+GK_merged_simple <- GK_merged
+names(GK_merged_simple) <- name_map[names(GK_merged)]
+
+colnames(GK_merged_simple)[15] <- "XV"
+colnames(GK_merged_simple)[16] <- "XVI"
+
+# Dividimos los datos en train (las 5 primeras temporadas) y test (temporada 2022 - 2023)
+# train_indices <- sample(1:nrow(GK_merged_simple), size = 0.7 * nrow(GK_merged_simple))
+GK_merged_train <- subset(GK_merged_simple, GK_merged_simple$I != 2023) # GK_merged_simple[train_indices, ]
+GK_merged_test <- subset(GK_merged_simple, GK_merged_simple$I == 2023) # GK_merged_simple[-train_indices, ]
+
+# Identificar las variables a predecir y las variables predictoras
+response_vars <- grep("_GK$", valid_column_names, value = TRUE)[-c(1:2, length(grep("_GK$", valid_column_names, value = TRUE)))]
+predictor_vars <- valid_column_names[-c(1:5, length(valid_column_names))]
+
+# Renombrar las variables de respuesta y predictores usando los nombres simples
+response_vars_simple <- name_map[response_vars]
+predictor_vars_simple <- name_map[predictor_vars]
+
+# Eliminar variables predictoras constantes
+# predictor_vars_simple <- predictor_vars_simple[sapply(GK_merged_train[predictor_vars_simple], function(x) length(unique(x)) > 1)]
+
+# Inicializar lista para almacenar los modelos
+models <- list()
+
+# Ajustar modelos
+for (response_var in response_vars_simple) {
+  
+  # response_var = response_vars_simple[1]
+  cat("Ajustando modelo para:", response_var, "\n")
+  
+  # Excluir la variable respuesta de las predictoras
+  predictors <- setdiff(predictor_vars_simple, response_var)
+  
+  # Verificar y eliminar variables altamente correlacionadas
+  predictor_data <- GK_merged_train[, predictors, drop = FALSE]
+  corr_matrix <- cor(predictor_data, use = "pairwise.complete.obs")
+  high_corr_vars <- findCorrelation(corr_matrix, cutoff = 0.9)
+  predictors <- predictors[-high_corr_vars]
+  
+  # Verificar y eliminar variables con baja varianza
+  low_var_vars <- caret::nearZeroVar(GK_merged_train[predictors], saveMetrics = TRUE)
+  predictors <- rownames(low_var_vars)[!low_var_vars$nzv]
+  
+  # Seleccionar variables altamente correlacionadas con la variable respuesta
+  cor_with_response <- sapply(GK_merged_train[predictors], function(x) cor(x, GK_merged_train[[response_var]], use = "complete.obs"))
+  high_cor_predictors <- names(cor_with_response[abs(cor_with_response) > 0.2]) # Usar un umbral de 0.2
+  
+  # Combinar los métodos de selección
+  final_predictors <- high_cor_predictors
+  
+  # Crear la fórmula dinámica inicial
+  formula_str <- paste(response_var, "~", paste(final_predictors, collapse = " + "))
+  formula_dynamic <- as.formula(formula_str)
+  
+  # cat("Fórmula inicial:", formula_str, "\n")
+  
+  # Intentar ajustar el modelo lineal mixto usando la fórmula dinámica inicial
+  tryCatch({
+    initial_model <- lm(formula_dynamic, data = GK_merged_train)
+    
+    # Selección automatizada de variables utilizando stepAIC
+    stepwise_model <- stepAIC(initial_model, direction = "both", trace = FALSE)
+    
+    # Extraer la fórmula seleccionada
+    selected_formula <- formula(stepwise_model)
+    
+    # cat("Fórmula seleccionada:", deparse(selected_formula), "\n")
+    
+    # Ajustar el modelo lineal mixto utilizando la fórmula seleccionada
+    final_model <- lme(
+      fixed = selected_formula, 
+      random = ~ 1 | IV, # IV = Player
+      correlation = corAR1(form = ~ LXXXI | IV), # IV = Player // LXXXI = Time_Index
+      data = GK_merged_train
+    )
+    models[[response_var]] <- final_model
+  }, error = function(e) {
+    message(paste("Error fitting model for response variable", response_var, ":", e$message))
+  })
+}
+```
+
+
+
+```{r}
+library(merTools)
+
+# Función para calcular predicciones usando simulate
+simulate_predict <- function(model, newdata) {
+  fixed_effects <- fixef(model)
+  random_effects <- ranef(model)
+  pred_fixed <- model.matrix(model$terms, newdata) %*% fixed_effects
+  
+  newdata$IV <- as.factor(newdata$IV) # Ensure the grouping variable is a factor
+  groups <- unique(newdata$IV)
+  pred_random <- numeric(nrow(newdata))
+  
+  for (group in groups) {
+    group_idx <- which(newdata$IV == group)
+    if (group %in% names(random_effects[[1]])) {
+      pred_random[group_idx] <- random_effects[[1]][group, "(Intercept)"]
+    } else {
+      pred_random[group_idx] <- 0
+    }
+  }
+  
+  predictions <- pred_fixed + pred_random
+  return(predictions)
+}
+```
+
+```{r}
+# Inicializar una lista para almacenar los RMSE
+
+# library(ggeffects)
+
+rmse_values <- list()
+
+for (response_var in response_vars_simple) {
+  
+  # response_var = response_vars_simple[15]
+  
+  cat("Realizando predicciones para:", response_var, "\n")
+  
+  # Verificar si el modelo fue ajustado correctamente
+  if (!is.null(models[[response_var]])) {
+    
+    # Verificar que las variables en la fórmula seleccionada están presentes en el conjunto de datos de prueba
+    model_formula <- models[[response_var]]$coefficients$fixed
+    required_vars <- names(model_formula)[-1]
+    missing_vars <- setdiff(required_vars, names(GK_merged_test))
+    
+    # cat("Variables requeridas:", paste(required_vars, collapse = ", "), "\n")
+    # cat("Variables presentes en test:", paste(names(GK_merged_test), collapse = ", "), "\n")
+    
+    if (length(missing_vars) == 0) {
+      # Realizar predicciones en los datos de prueba
+      tryCatch({
+        predictions <- simulate_predict(models[[response_var]], newdata = GK_merged_test)
+
+        
+        # Calcular el RMSE
+        actuals <- GK_merged_test[[response_var]]
+        rmse_val <- rmse(actuals, predictions)
+        
+        # Almacenar el RMSE en la lista
+        rmse_values[[response_var]] <- rmse_val
+      }, error = function(e) {
+        message(paste("Error predicting for response variable", response_var, ":", e$message))
+        rmse_values[[response_var]] <- NA
+      })
+    } else {
+      message(paste("Variables faltantes en GK_merged_test para el modelo de", response_var, ":", paste(missing_vars, collapse = ", ")))
+      rmse_values[[response_var]] <- NA
+    }
+  } else {
+    rmse_values[[response_var]] <- NA
+  }
+}
+
+# Convertir los nombres simples de las variables de respuesta a sus nombres originales para los resultados
+names(rmse_values) <- names(name_map)[match(names(rmse_values), name_map)]
+
+# Convertir la lista de RMSE en un data frame para facilitar la visualización
+rmse_df <- data.frame(
+  Response_Variable = names(rmse_values),
+  RMSE = unlist(rmse_values)
+)
+
+# Mostrar los valores de RMSE
+print(rmse_df)
+```
+
+
+# GLMM
+
+```{r}
+library(glmmTMB)
+
+#Porteros + Equipos retardados
+GK_retarded <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Retarded_Data/GK_retarded.csv")
+# head(GK_retarded)
+
+# Porteros (largo)
+GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_GK_data_clustered.csv")[,-6]
+
+GK_cols_to_rename <- names(GK_data)[5:22]
+GK_data <- GK_data %>%
+  rename_with(~paste0(., "_GK"), all_of(GK_cols_to_rename))
+
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Teams_data_clustered.csv")
+Teams_cols_to_rename <- names(Teams_data)[4:61]
+
+Teams_data <- Teams_data %>%
+  rename_with(~paste0(., "_Teams"), all_of(Teams_cols_to_rename))
+
+# Realizar el merge
+GK_merged <- merge(GK_data, Teams_data, by = c("Season_End_Year", "Squad", "Comp"), all = TRUE)
+```
+
+```{r}
+# Ordenar los datos por Player y Season_End_Year
+GK_merged <- GK_merged %>%
+  arrange(Player, Season_End_Year)
+
+# Crear un índice de tiempo artificial dentro de cada Player
+GK_merged <- GK_merged %>%
+  group_by(Player) %>%
+  mutate(Time_Index = row_number())
+
+# Verificar la estructura del dataframe después de agregar el índice de tiempo
+head(GK_merged)
+```
+
+
+```{r}
+# Convertir solo Cluster_GK y Cluster_Teams a factores
+GK_merged$Cluster_GK <- factor(GK_merged$Cluster_GK)
+GK_merged$Cluster_Teams <- factor(GK_merged$Cluster_Teams)
+
+# Seleccionar solo las variables que queremos transformar a dummy
+vars_to_dummy <- c("Cluster_GK", "Cluster_Teams")
+
+# Convertir variables categóricas en variables dummy
+dummies <- dummyVars(~ ., data = GK_merged[vars_to_dummy], fullRank = TRUE)
+GK_merged_dummies <- predict(dummies, newdata = GK_merged[vars_to_dummy]) %>%
+  as.data.frame()
+
+# Añadir las variables dummies de vuelta al dataframe original excluyendo las originales
+GK_merged[vars_to_dummy] <- NULL
+GK_merged <- cbind(GK_merged, GK_merged_dummies)
+
+# Crear nombres válidos para las columnas
+valid_column_names <- make.names(names(GK_merged))
+names(GK_merged) <- valid_column_names
+
+# Dividimos los datos en train (las 5 primeras temporadas) y test (temporada 2022 - 2023)
+GK_merged_train <- subset(GK_merged, GK_merged$Season_End_Year != 2023)
+GK_merged_test <- subset(GK_merged, GK_merged$Season_End_Year == 2023)
+
+# Identificar las variables a predecir y las variables predictoras
+response_vars <- grep("_GK$", valid_column_names, value = TRUE)[-c(1:2)]
+predictor_vars <- valid_column_names[-c(1:5, 79)]
+
+# Inicializar lista para almacenar los modelos
+models <- list()
+
+# Ajustar modelos GLMM usando glmmTMB
+for (response_var in response_vars) {
+  
+  # response_var = response_vars[1]
+  cat("Ajustando modelo para:", response_var, "\n")
+  
+  # Excluir la variable respuesta de las predictoras
+  predictors <- setdiff(predictor_vars, response_var)
+  
+  # Verificar y eliminar variables altamente correlacionadas
+  predictor_data <- GK_merged_train[, predictors, drop = FALSE]
+  corr_matrix <- cor(predictor_data, use = "pairwise.complete.obs")
+  high_corr_vars <- findCorrelation(corr_matrix, cutoff = 0.9)
+  predictors <- predictors[-high_corr_vars]
+  
+  # Verificar y eliminar variables con baja varianza
+  low_var_vars <- caret::nearZeroVar(GK_merged_train[predictors], saveMetrics = TRUE)
+  predictors <- rownames(low_var_vars)[!low_var_vars$nzv]
+  
+  # Seleccionar variables altamente correlacionadas con la variable respuesta
+  cor_with_response <- sapply(GK_merged_train[predictors], function(x) cor(x, GK_merged_train[[response_var]], use = "complete.obs"))
+  high_cor_predictors <- names(cor_with_response[abs(cor_with_response) > 0.2]) # Usar un umbral de 0.2
+  
+  # Combinar los métodos de selección
+  final_predictors <- high_cor_predictors
+  
+  # Estandarizar las variables predictoras seleccionadas
+  # GK_merged_train[final_predictors] <- scale(GK_merged_train[final_predictors])
+  # GK_merged_test[final_predictors] <- scale(GK_merged_test[final_predictors])
+  
+  # Crear la fórmula dinámica inicial
+  formula_str <- paste(response_var, "~", paste(final_predictors, collapse = " + "))
+  formula_dynamic <- as.formula(formula_str)
+  
+  tryCatch({
+    initial_model <- lm(formula_dynamic, data = GK_merged_train)
+    
+    # Selección automatizada de variables utilizando stepAIC
+    stepwise_model <- stepAIC(initial_model, direction = "both", trace = FALSE)
+    
+    # Extraer la fórmula seleccionada
+    selected_formula <- as.formula(paste(deparse(stepwise_model$terms)))
+    
+    # Ajustar el modelo GLMM utilizando glmmTMB
+    final_model <- glmmTMB(
+      formula = selected_formula, 
+      data = GK_merged_train,
+      family = gaussian()
+    )
+    models[[response_var]] <- final_model
+  }, error = function(e) {
+    message(paste("Error fitting model for response variable", response_var, ":", e$message))
+  })
+}
+
+
+
+```
+
+
+```{r}
+# Función para calcular predicciones usando glmmTMB::predict
+predict_glmm <- function(model, newdata) {
+  predictions <- predict(model, newdata, allow.new.levels = TRUE)
+  return(predictions)
+}
+
+# Inicializar una lista para almacenar los RMSE
+rmse_values <- list()
+
+for (response_var in response_vars) {
+  
+  cat("Realizando predicciones para:", response_var, "\n")
+  
+  # Verificar si el modelo fue ajustado correctamente
+  if (!is.null(models[[response_var]])) {
+    
+    # Realizar predicciones en los datos de prueba
+    tryCatch({
+      predictions <- predict_glmm(models[[response_var]], newdata = GK_merged_test)
+      
+      # Calcular el RMSE
+      actuals <- GK_merged_test[[response_var]]
+      rmse_val <- rmse(actuals, predictions)
+      
+      # Almacenar el RMSE en la lista
+      rmse_values[[response_var]] <- rmse_val
+    }, error = function(e) {
+      message(paste("Error predicting for response variable", response_var, ":", e$message))
+      rmse_values[[response_var]] <- NA
+    })
+  } else {
+    rmse_values[[response_var]] <- NA
+  }
+}
+
+# Convertir la lista de RMSE en un data frame para facilitar la visualización
+rmse_df <- data.frame(
+  Response_Variable = names(rmse_values),
+  RMSE = unlist(rmse_values)
+)
+
+# Mostrar los valores de RMSE
+print(rmse_df)
+```
+
+
+# Decition Tree
+
+```{r}
+#Porteros + Equipos retardados
+GK_retarded <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Retarded_Data/GK_retarded.csv")
+# head(GK_retarded)
+
+# Porteros (largo)
+GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_GK_data_clustered.csv")[,-6]
+
+GK_cols_to_rename <- names(GK_data)[5:22]
+GK_data <- GK_data %>%
+  rename_with(~paste0(., "_GK"), all_of(GK_cols_to_rename))
+
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Teams_data_clustered.csv")
+Teams_cols_to_rename <- names(Teams_data)[4:61]
+Teams_data <- Teams_data %>%
+  rename_with(~paste0(., "_Teams"), all_of(Teams_cols_to_rename))
+
+# Realizar el merge
+GK_merged <- merge(GK_data, Teams_data, by = c("Season_End_Year", "Squad", "Comp"), all = TRUE)
+```
+
+```{r}
+#Porteros + Equipos retardados
+GK_retarded <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Retarded_Data/GK_retarded.csv")
+# head(GK_retarded)
+
+# Porteros (largo)
+GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_GK_data_clustered.csv")[,-6]
+
+GK_cols_to_rename <- names(GK_data)[5:22]
+GK_data <- GK_data %>%
+  rename_with(~paste0(., "_GK"), all_of(GK_cols_to_rename))
+
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Teams_data_clustered.csv")
+Teams_cols_to_rename <- names(Teams_data)[4:61]
+Teams_data <- Teams_data %>%
+  rename_with(~paste0(., "_Teams"), all_of(Teams_cols_to_rename))
+
+# Realizar el merge
+GK_merged <- merge(GK_data, Teams_data, by = c("Season_End_Year", "Squad", "Comp"), all = TRUE)
+```
+
+```{r}
+# Ordenar los datos por Player y Season_End_Year
+GK_merged <- GK_merged %>%
+  arrange(Player, Season_End_Year)
+
+# Crear un índice de tiempo artificial dentro de cada Player
+GK_merged <- GK_merged %>%
+  group_by(Player) %>%
+  mutate(Time_Index = row_number())
+
+# Verificar la estructura del dataframe después de agregar el índice de tiempo
+head(GK_merged)
+```
+
+
+```{r}
+valid_column_names <- make.names(names(GK_merged))
+names(GK_merged) <- valid_column_names
+
+# Convertir variables categóricas a factores
+categorical_vars <- sapply(GK_merged, is.character)
+GK_merged[categorical_vars] <- lapply(GK_merged[categorical_vars], factor)
+
+# Eliminar filas con valores faltantes
+GK_merged <- GK_merged %>% drop_na()
+
+# Dividir los datos en train (70%) y test (30%)
+# train_indices <- sample(1:nrow(GK_merged_simple), size = 0.7 * nrow(GK_merged_simple))
+GK_merged_train <- subset(GK_merged, GK_merged$Season_End_Year != 2023) # GK_merged_simple[train_indices, ]
+GK_merged_test <- subset(GK_merged, GK_merged$Season_End_Year == 2023) # GK_merged_simple[-train_indices, ]
+
+# Identificar las variables a predecir y las variables predictoras
+response_vars <- grep("_GK$", names(GK_merged), value = TRUE)[-c(1,2, length(grep("_GK$", names(GK_merged), value = TRUE)))]
+predictor_vars <- c(names(GK_merged), "Player", "Season_End_Year", "Time_Index")
+
+# Eliminar variables predictoras constantes
+predictor_vars <- predictor_vars[sapply(GK_merged_train[predictor_vars], function(x) length(unique(x)) > 1)]
+
+# Inicializar lista para almacenar los modelos
+models <- list()
+
+# Ajustar modelos de árboles de decisión
+for (response_var in response_vars) {
+  
+  cat("Ajustando modelo para:", response_var, "\n")
+  
+  predictors <- setdiff(predictor_vars, response_var)
+
+  # Crear la fórmula dinámica
+  formula_str <- paste(response_var, "~", paste(predictors, collapse = " + "))
+  formula_dynamic <- as.formula(formula_str)
+  
+  # Intentar ajustar el modelo de árbol de decisión usando la fórmula dinámica
+  tryCatch({
+    tree_model <- rpart(formula_dynamic, data = GK_merged_train, method = "anova")
+    models[[response_var]] <- tree_model
+  }, error = function(e) {
+    message(paste("Error fitting model for response variable", response_var, ":", e$message))
+  })
+}
+
+length(models)
+```
+
+```{r}
+# Inicializar una lista para almacenar los RMSE
+rmse_values <- list()
+
+for (response_var in response_vars) {
+  
+  cat("Realizando predicciones para:", response_var, "\n")
+  
+  # Verificar si el modelo fue ajustado correctamente
+  if (!is.null(models[[response_var]])) {
+    
+    # Realizar predicciones en los datos de prueba
+    tryCatch({
+      predictions <- predict(models[[response_var]], newdata = GK_merged_test)
+      
+      # Calcular el RMSE
+      actuals <- GK_merged_test[[response_var]]
+      rmse_val <- rmse(actuals, predictions)
+      
+      # Almacenar el RMSE en la lista
+      rmse_values[[response_var]] <- rmse_val
+    }, error = function(e) {
+      message(paste("Error predicting for response variable", response_var, ":", e$message))
+      rmse_values[[response_var]] <- NA
+    })
+  } else {
+    rmse_values[[response_var]] <- NA
+  }
+}
+
+# Convertir la lista de RMSE en un data frame para facilitar la visualización
+rmse_df <- data.frame(
+  Response_Variable = names(rmse_values),
+  RMSE = unlist(rmse_values)
+)
+
+# Mostrar los valores de RMSE
+print(rmse_df)
+```
+
+# Random Forest
+
+```{r}
+# Ordenar los datos por Player y Season_End_Year
+GK_merged <- GK_merged %>%
+  arrange(Player, Season_End_Year)
+
+# Crear un índice de tiempo artificial dentro de cada Player
+GK_merged <- GK_merged %>%
+  group_by(Player) %>%
+  mutate(Time_Index = row_number())
+
+# Verificar la estructura del dataframe después de agregar el índice de tiempo
+head(GK_merged)
+```
+
+```{r}
+# Asegurar nombres válidos para todas las columnas
+valid_column_names <- make.names(names(GK_merged))
+names(GK_merged) <- valid_column_names
+
+# Convertir variables categóricas a factores
+categorical_vars <- sapply(GK_merged, is.character)
+GK_merged[categorical_vars] <- lapply(GK_merged[categorical_vars], factor)
+
+# Eliminar filas con valores faltantes
+GK_merged <- GK_merged %>% drop_na()
+
+# Dividir los datos en train y test
+GK_merged_train <- subset(GK_merged, GK_merged$Season_End_Year != 2023)
+GK_merged_test <- subset(GK_merged, GK_merged$Season_End_Year == 2023)
+
+# Identificar las variables a predecir y las variables predictoras
+response_vars <- grep("_GK$", names(GK_merged), value = TRUE)[-c(1,2, length(grep("_GK$", names(GK_merged), value = TRUE)))]
+predictor_vars <- setdiff(names(GK_merged), c(response_vars, "Player", "Season_End_Year", "Time_Index"))[-c(1,2,3)]
+
+# Eliminar variables predictoras constantes
+predictor_vars <- predictor_vars[sapply(GK_merged_train[predictor_vars], function(x) length(unique(x)) > 1)]
+
+# Inicializar lista para almacenar los modelos
+models <- list()
+
+# Ajustar modelos de Random Forest
+for (response_var in response_vars) {
+  
+  cat("Ajustando modelo para:", response_var, "\n")
+  
+  predictors <- setdiff(predictor_vars, response_var)
+
+  # Crear la fórmula dinámica
+  formula_str <- paste(response_var, "~", paste(predictors, collapse = " + "))
+  formula_dynamic <- as.formula(formula_str)
+  
+  # Intentar ajustar el modelo de Random Forest usando la fórmula dinámica
+  tryCatch({
+    rf_model <- randomForest(formula_dynamic, data = GK_merged_train, na.action = na.omit)
+    models[[response_var]] <- rf_model
+  }, error = function(e) {
+    message(paste("Error fitting model for response variable", response_var, ":", e$message))
+  })
+}
+
+length(models)
+```
+
+
+```{r}
+# Inicializar una lista para almacenar los RMSE
+rmse_values <- list()
+
+for (response_var in response_vars) {
+  
+  cat("Realizando predicciones para:", response_var, "\n")
+  
+  # Verificar si el modelo fue ajustado correctamente
+  if (!is.null(models[[response_var]])) {
+    
+    # Realizar predicciones en los datos de prueba
+    tryCatch({
+      predictions <- predict(models[[response_var]], newdata = GK_merged_test)
+      
+      # Calcular el RMSE
+      actuals <- GK_merged_test[[response_var]]
+      rmse_val <- rmse(actuals, predictions)
+      
+      # Almacenar el RMSE en la lista
+      rmse_values[[response_var]] <- rmse_val
+    }, error = function(e) {
+      message(paste("Error predicting for response variable", response_var, ":", e$message))
+      rmse_values[[response_var]] <- NA
+    })
+  } else {
+    rmse_values[[response_var]] <- NA
+  }
+}
+
+# Convertir la lista de RMSE en un data frame para facilitar la visualización
+rmse_df <- data.frame(
+  Response_Variable = names(rmse_values),
+  RMSE = unlist(rmse_values)
+)
+
+# Mostrar los valores de RMSE
+print(rmse_df)
+
+```
+
+# XGBoost
+
+
+```{r}
+#Porteros + Equipos retardados
+GK_retarded <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Retarded_Data/GK_retarded.csv")
+# head(GK_retarded)
+
+# Porteros (largo)
+GK_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Players_GK_data_clustered.csv")[,-6]
+
+GK_cols_to_rename <- names(GK_data)[5:22]
+GK_data <- GK_data %>%
+  rename_with(~paste0(., "_GK"), all_of(GK_cols_to_rename))
+
+Teams_data <- read_csv("C:/Users/rsier/Desktop/MASTERS/LaSalle - MUDS/TFM/Data/Def_Data/Clustering_Data/Teams_data_clustered.csv")
+Teams_cols_to_rename <- names(Teams_data)[4:61]
+Teams_data <- Teams_data %>%
+  rename_with(~paste0(., "_Teams"), all_of(Teams_cols_to_rename))
+
+# Realizar el merge
+GK_merged <- merge(GK_data, Teams_data, by = c("Season_End_Year", "Squad", "Comp"), all = TRUE)
+```
+
+
+```{r}
+# Ordenar los datos por Player y Season_End_Year
+GK_merged <- GK_merged %>%
+  arrange(Player, Season_End_Year)
+
+# Crear un índice de tiempo artificial dentro de cada Player
+GK_merged <- GK_merged %>%
+  group_by(Player) %>%
+  mutate(Time_Index = row_number())
+
+# Verificar la estructura del dataframe después de agregar el índice de tiempo
+head(GK_merged)
+```
+
+
+```{r}
+# Asegurar nombres válidos para todas las columnas
+valid_column_names <- make.names(names(GK_merged))
+names(GK_merged) <- valid_column_names
+
+GK_merged_og <- GK_merged
+
+# Convertir variables categóricas a factores, excluyendo las que no queremos transformar a dummy
+categorical_vars <- sapply(GK_merged, is.character)
+excluded_vars <- c("Squad", "Comp", "Player", "Nation_GK")
+categorical_vars[excluded_vars] <- FALSE
+GK_merged[categorical_vars] <- lapply(GK_merged[categorical_vars], factor)
+
+# Seleccionar solo las variables que queremos transformar a dummy
+vars_to_dummy <- setdiff(names(GK_merged), excluded_vars)
+
+# Convertir variables categóricas en variables dummy
+GK_merged <- dummyVars(~ ., data = GK_merged[vars_to_dummy], fullRank = TRUE) %>%
+  predict(newdata = GK_merged[vars_to_dummy]) %>%
+  as.data.frame()
+
+# Añadir las variables excluidas de vuelta al dataframe
+GK_merged <- cbind(GK_merged, GK_merged_og[excluded_vars])
+
+# Eliminar filas con valores faltantes
+GK_merged <- GK_merged %>% drop_na()
+
+# Dividir los datos en train y test
+GK_merged_train <- subset(GK_merged, GK_merged$Season_End_Year != 2023)
+GK_merged_test <- subset(GK_merged, GK_merged$Season_End_Year == 2023)
+
+# Identificar las variables a predecir y las variables predictoras
+response_vars <- grep("_GK$", names(GK_merged), value = TRUE)[-c(1,
+                                                                 length(grep("_GK$", names(GK_merged), value = TRUE))-1, 
+                                                                 length(grep("_GK$", names(GK_merged), value = TRUE)))]
+
+predictor_vars <- setdiff(names(GK_merged), c(response_vars, "Player", "Season_End_Year", "Time_Index", excluded_vars))
+
+# Eliminar variables predictoras constantes
+predictor_vars <- predictor_vars[sapply(GK_merged_train[predictor_vars], function(x) length(unique(x)) > 1)]
+
+# Inicializar lista para almacenar los modelos
+models <- list()
+
+# Ajustar modelos de XGBoost
+for (response_var in response_vars) {
+  
+  cat("Ajustando modelo para:", response_var, "\n")
+  
+  predictors <- setdiff(predictor_vars, response_var)
+  
+  # Crear las matrices DMatrix para XGBoost
+  train_matrix <- xgb.DMatrix(data = as.matrix(GK_merged_train[, predictors]), label = GK_merged_train[[response_var]])
+  test_matrix <- xgb.DMatrix(data = as.matrix(GK_merged_test[, predictors]), label = GK_merged_test[[response_var]])
+  
+  # Parámetros de XGBoost
+  params <- list(
+    objective = "reg:squarederror",
+    eval_metric = "rmse"
+  )
+  
+  # Ajustar el modelo de XGBoost
+  tryCatch({
+    xgb_model <- xgb.train(params = params, data = train_matrix, nrounds = 100, watchlist = list(train = train_matrix, test = test_matrix), early_stopping_rounds = 10)
+    models[[response_var]] <- xgb_model
+  }, error = function(e) {
+    message(paste("Error fitting model for response variable", response_var, ":", e$message))
+  })
+}
+
+length(models)
+```
+
+```{r}
+# Inicializar una lista para almacenar los RMSE
+rmse_values <- list()
+
+for (response_var in response_vars) {
+  
+  cat("Realizando predicciones para:", response_var, "\n")
+  
+  # Verificar si el modelo fue ajustado correctamente
+  if (!is.null(models[[response_var]])) {
+    
+    # Realizar predicciones en los datos de prueba
+    tryCatch({
+      test_matrix <- xgb.DMatrix(data = as.matrix(GK_merged_test[, predictors]))
+      predictions <- predict(models[[response_var]], newdata = test_matrix)
+      
+      # Calcular el RMSE
+      actuals <- GK_merged_test[[response_var]]
+      rmse_val <- rmse(actuals, predictions)
+      
+      # Almacenar el RMSE en la lista
+      rmse_values[[response_var]] <- rmse_val
+    }, error = function(e) {
+      message(paste("Error predicting for response variable", response_var, ":", e$message))
+      rmse_values[[response_var]] <- NA
+    })
+  } else {
+    rmse_values[[response_var]] <- NA
+  }
+}
+
+# Convertir la lista de RMSE en un data frame para facilitar la visualización
+rmse_df <- data.frame(
+  Response_Variable = names(rmse_values),
+  RMSE = unlist(rmse_values)
+)
+
+# Mostrar los valores de RMSE
+print(rmse_df)
+```
+
+
+
+
+
+
+
+
+
